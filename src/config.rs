@@ -90,6 +90,8 @@ pub struct KeybindingsConfig {
     pub search_prev: String,
     pub help: String,
     pub next_theme: String,
+    pub toc_up: String,
+    pub toc_down: String,
 }
 
 impl Default for KeybindingsConfig {
@@ -110,6 +112,8 @@ impl Default for KeybindingsConfig {
             search_prev: "N".to_string(),
             help: "?".to_string(),
             next_theme: "t".to_string(),
+            toc_up: "K".to_string(),
+            toc_down: "J".to_string(),
         }
     }
 }
@@ -175,7 +179,10 @@ impl KeyBinding {
             return false;
         }
 
-        let relevant_modifiers = modifiers & !KeyModifiers::SHIFT;
+        let relevant_modifiers = match code {
+            KeyCode::Char(_) => modifiers & !KeyModifiers::SHIFT,
+            _ => modifiers,
+        };
         relevant_modifiers == self.modifiers
     }
 }
@@ -197,6 +204,8 @@ pub struct ResolvedKeybindings {
     pub search_prev: KeyBinding,
     pub help: KeyBinding,
     pub next_theme: KeyBinding,
+    pub toc_up: KeyBinding,
+    pub toc_down: KeyBinding,
 }
 
 impl Default for ThemeConfig {
@@ -282,11 +291,19 @@ pub fn load() -> Result<()> {
                 Ok(c) => {
                     let keymap = ResolvedKeybindings::from_config(&c);
                     let mut config = c;
-                    if let Some(theme_name) = ThemeName::from_str(&config.theme_name) {
-                        config.theme = ThemeConfig::from(ThemeColors::from_theme(theme_name));
-                        if let Some(index) = AVAILABLE_THEMES.iter().position(|&t| t == theme_name)
-                        {
-                            CURRENT_THEME_INDEX.store(index, Ordering::Relaxed);
+                    if !config.theme_name.is_empty() {
+                        if let Some(theme_name) = ThemeName::from_str(&config.theme_name) {
+                            config.theme = ThemeConfig::from(ThemeColors::from_theme(theme_name));
+                            if let Some(index) =
+                                AVAILABLE_THEMES.iter().position(|&t| t == theme_name)
+                            {
+                                CURRENT_THEME_INDEX.store(index, Ordering::Relaxed);
+                            }
+                        } else {
+                            errors.push(format!(
+                                "Unknown theme name '{}', using default theme",
+                                config.theme_name
+                            ));
                         }
                     }
                     let _ = CONFIG.set(config.clone());
@@ -427,6 +444,8 @@ impl Default for ResolvedKeybindings {
             search_prev: KeyBinding::new(KeyCode::Char('N'), KeyModifiers::empty()),
             help: KeyBinding::new(KeyCode::Char('?'), KeyModifiers::empty()),
             next_theme: KeyBinding::new(KeyCode::Char('t'), KeyModifiers::empty()),
+            toc_up: KeyBinding::new(KeyCode::Char('K'), KeyModifiers::empty()),
+            toc_down: KeyBinding::new(KeyCode::Char('J'), KeyModifiers::empty()),
         }
     }
 }
@@ -450,6 +469,8 @@ impl ResolvedKeybindings {
             search_prev: parse_key(&keys.search_prev),
             help: parse_key(&keys.help),
             next_theme: parse_key(&keys.next_theme),
+            toc_up: parse_key(&keys.toc_up),
+            toc_down: parse_key(&keys.toc_down),
         }
     }
 }

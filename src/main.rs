@@ -205,12 +205,6 @@ fn run(
                     } = renderer::render_nodes(&app.document.nodes, content_width);
                     app.update_render(lines, img_pos, &node_line_starts);
 
-                    if img_mgr.is_enabled() {
-                        let base_dir = get_base_dir(&app.file_path);
-                        for (_, src, _) in &app.image_positions {
-                            img_mgr.load_async(src, base_dir);
-                        }
-                    }
                     last_width = content_width;
                     needs_redraw = true;
                 }
@@ -360,16 +354,12 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         c if keys.quit.matches(c, modifiers) => app.quit = true,
         c if keys.help.matches(c, modifiers) => app.toggle_help(),
 
-        c if keys.focus_prev.matches(c, modifiers)
-            || (c == KeyCode::Left && modifiers.is_empty()) =>
-        {
+        c if keys.focus_prev.matches(c, modifiers) => {
             if app.focus == Focus::Content && app.show_toc {
                 app.focus = Focus::Toc;
             }
         }
-        c if keys.focus_next.matches(c, modifiers)
-            || (c == KeyCode::Right && modifiers.is_empty()) =>
-        {
+        c if keys.focus_next.matches(c, modifiers) => {
             if app.focus == Focus::Toc {
                 app.focus = Focus::Content;
             }
@@ -383,33 +373,25 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('<') if modifiers.is_empty() => app.narrow_toc(),
         KeyCode::Char('>') if modifiers.is_empty() => app.widen_toc(),
 
-        c if keys.down.matches(c, modifiers) || (c == KeyCode::Down && modifiers.is_empty()) => {
+        c if keys.down.matches(c, modifiers) => {
             if app.focus == Focus::Content {
                 app.scroll_down(1);
             } else {
                 app.toc_down();
             }
         }
-        c if keys.up.matches(c, modifiers) || (c == KeyCode::Up && modifiers.is_empty()) => {
+        c if keys.up.matches(c, modifiers) => {
             if app.focus == Focus::Content {
                 app.scroll_up(1);
             } else {
                 app.toc_up();
             }
         }
-        KeyCode::Char('J') if modifiers.is_empty() => app.toc_down(),
-        KeyCode::Char('K') if modifiers.is_empty() => app.toc_up(),
+        c if keys.toc_down.matches(c, modifiers) => app.toc_down(),
+        c if keys.toc_up.matches(c, modifiers) => app.toc_up(),
 
-        c if keys.page_down.matches(c, modifiers)
-            || (c == KeyCode::PageDown && modifiers.is_empty()) =>
-        {
-            app.scroll_down(app.half_page())
-        }
-        c if keys.page_up.matches(c, modifiers)
-            || (c == KeyCode::PageUp && modifiers.is_empty()) =>
-        {
-            app.scroll_up(app.half_page())
-        }
+        c if keys.page_down.matches(c, modifiers) => app.scroll_down(app.half_page()),
+        c if keys.page_up.matches(c, modifiers) => app.scroll_up(app.half_page()),
         c if keys.top.matches(c, modifiers) => app.scroll_top(),
         c if keys.bottom.matches(c, modifiers) => app.scroll_bottom(),
 
@@ -470,12 +452,8 @@ fn handle_theme_picker_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                 config::apply_theme_by_index(index);
             }
         }
-        c if keys.up.matches(c, modifiers) || (c == KeyCode::Up && modifiers.is_empty()) => {
-            preview(app, -1)
-        }
-        c if keys.down.matches(c, modifiers) || (c == KeyCode::Down && modifiers.is_empty()) => {
-            preview(app, 1)
-        }
+        c if keys.up.matches(c, modifiers) => preview(app, -1),
+        c if keys.down.matches(c, modifiers) => preview(app, 1),
         _ => {}
     }
 }

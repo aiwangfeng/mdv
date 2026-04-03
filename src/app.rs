@@ -28,8 +28,7 @@ pub struct App {
 
     pub document: Document,
     pub rendered_lines: Vec<Line<'static>>,
-    pub rendered_texts: Vec<String>,
-    rendered_texts_computed: bool,
+    rendered_texts_lower: HashMap<usize, String>,
     pub image_positions: Vec<(usize, String, String)>,
     pub toc_line_indices: Vec<usize>,
 
@@ -50,7 +49,7 @@ pub struct App {
     pub search_query: String,
     pub search_matches: Vec<usize>,
     pub search_current: usize,
-    search_highlight_cache: HashMap<(usize, usize), Vec<Line<'static>>>,
+    search_highlight_cache: HashMap<usize, Line<'static>>,
     cached_search_query: Option<String>,
     pub theme_picker_index: usize,
     theme_picker_origin: Option<usize>,
@@ -76,8 +75,7 @@ impl App {
             file_name,
             document,
             rendered_lines,
-            rendered_texts: Vec::new(),
-            rendered_texts_computed: false,
+            rendered_texts_lower: HashMap::new(),
             image_positions,
             toc_line_indices,
             toc_width_pct: 25,
@@ -101,22 +99,22 @@ impl App {
         }
     }
 
-    fn ensure_rendered_texts(&mut self) {
-        if self.rendered_texts_computed {
-            return;
+    fn line_lower(&mut self, idx: usize) -> String {
+        if let Some(s) = self.rendered_texts_lower.get(&idx) {
+            return s.clone();
         }
-        self.rendered_texts = self
-            .rendered_lines
+        let s = self.rendered_lines[idx]
+            .spans
             .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .to_lowercase()
-            })
-            .collect();
-        self.rendered_texts_computed = true;
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+            .to_lowercase();
+        self.rendered_texts_lower.insert(idx, s.clone());
+        s
+    }
+
+    pub fn line_lower_ref(&self, idx: usize) -> Option<String> {
+        self.rendered_texts_lower.get(&idx).cloned()
     }
 
     // ---------------------------------------------------------------------------
@@ -184,9 +182,11 @@ impl App {
     }
 
     pub fn toc_jump_to_cursor(&mut self) {
-        if let Some(&line) = self.toc_line_indices.get(self.toc_cursor) {
-            self.scroll_to(line);
+        if self.toc_line_indices.is_empty() || self.toc_cursor >= self.toc_line_indices.len() {
+            return;
         }
+        let line = self.toc_line_indices[self.toc_cursor];
+        self.scroll_to(line);
     }
 
     fn ensure_toc_cursor_visible(&mut self) {
@@ -283,15 +283,15 @@ impl App {
             self.search_matches.clear();
             return;
         }
-        self.ensure_rendered_texts();
         let q = self.search_query.to_lowercase();
-        self.search_matches = self
-            .rendered_texts
-            .iter()
-            .enumerate()
-            .filter(|(_, text)| text.contains(&q))
-            .map(|(i, _)| i)
-            .collect();
+        let total = self.rendered_lines.len();
+        let mut matches = Vec::new();
+        for i in 0..total {
+            if self.line_lower(i).contains(&q) {
+                matches.push(i);
+            }
+        }
+        self.search_matches = matches;
         // Set current to the first match at or below current scroll
         self.search_current = self
             .search_matches
@@ -327,16 +327,16 @@ impl App {
         }
     }
 
-    pub fn get_cached_highlights(
-        &self,
-        start: usize,
-        height: usize,
-    ) -> Option<&Vec<Line<'static>>> {
-        self.search_highlight_cache.get(&(start, height))
+    pub fn get_cached_highlight(&self, line_idx: usize) -> Option<&Line<'static>> {
+        if self.cached_search_query.as_ref() != Some(&self.search_query) {
+            return None;
+        }
+        self.search_highlight_cache.get(&line_idx)
     }
 
-    pub fn cache_highlights(&mut self, start: usize, height: usize, lines: Vec<Line<'static>>) {
-        self.search_highlight_cache.insert((start, height), lines);
+    pub fn cache_highlight(&mut self, line_idx: usize, line: Line<'static>) {
+        self.cached_search_query = Some(self.search_query.clone());
+        self.search_highlight_cache.insert(line_idx, line);
     }
 
     pub fn invalidate_search_cache(&mut self) {
@@ -419,8 +419,7 @@ impl App {
         image_positions: Vec<(usize, String, String)>,
         node_line_starts: &[usize],
     ) {
-        self.rendered_texts.clear();
-        self.rendered_texts_computed = false;
+        self.rendered_texts_lower.clear();
         self.rendered_lines = rendered_lines;
         self.image_positions = image_positions;
         self.toc_line_indices = self

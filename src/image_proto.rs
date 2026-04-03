@@ -71,7 +71,7 @@ impl ImageManager {
     }
 
     fn resolve_safe_path(src: &str, base_dir: &Path) -> Option<PathBuf> {
-        let path = if src.starts_with('/') {
+        if src.starts_with('/') {
             let abs = PathBuf::from(src);
             let canonical = abs.canonicalize().ok()?;
             let allowed_prefixes = [std::env::var("HOME").ok()?, std::env::var("PWD").ok()?];
@@ -86,7 +86,7 @@ impl ImageManager {
                 );
                 return None;
             }
-            abs
+            Some(canonical)
         } else if let Some(rest) = src.strip_prefix("~/") {
             let home = dirs_home();
             let resolved = home.join(rest);
@@ -96,7 +96,7 @@ impl ImageManager {
                 log::warn!("Rejected path outside home directory: {}", src);
                 return None;
             }
-            resolved
+            Some(canonical)
         } else {
             let resolved = base_dir.join(src);
             let canonical = resolved.canonicalize().ok()?;
@@ -105,9 +105,8 @@ impl ImageManager {
                 log::warn!("Rejected path outside base directory: {}", src);
                 return None;
             }
-            resolved
-        };
-        Some(path)
+            Some(canonical)
+        }
     }
 
     /// Dispatch a background thread to load an image.
@@ -164,19 +163,10 @@ impl ImageManager {
     }
 
     fn start_load(&mut self, src: String, path: PathBuf) -> bool {
-        loop {
-            let current = self.active_loads.load(Ordering::Relaxed);
-            if current >= MAX_CONCURRENT_LOADS {
-                return false;
-            }
-
-            if self
-                .active_loads
-                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
+        let prev = self.active_loads.fetch_add(1, Ordering::SeqCst);
+        if prev >= MAX_CONCURRENT_LOADS {
+            self.active_loads.fetch_sub(1, Ordering::SeqCst);
+            return false;
         }
 
         let sender = self.sender.clone();
@@ -215,5 +205,8 @@ impl ImageManager {
 fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .unwrap_or_else(|_| {
+            log::warn!("$HOME is not set, defaulting to /tmp");
+            PathBuf::from("/tmp")
+        })
 }

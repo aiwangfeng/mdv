@@ -180,28 +180,35 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
             .cloned()
             .collect()
     } else {
-        if let Some(cached) = app.get_cached_highlights(scroll, height) {
-            cached.clone()
-        } else {
-            let visible_slice: Vec<Line> = app
-                .rendered_lines
-                .iter()
-                .skip(scroll)
-                .take(height)
-                .cloned()
-                .collect();
-            let end = (scroll + height).min(app.rendered_texts.len());
-            let visible_lowercased = &app.rendered_texts[scroll..end];
-            let highlighted = apply_search_highlight(
-                visible_slice,
-                &app.search_query,
-                current_match_line,
-                scroll,
-                Some(visible_lowercased),
-            );
-            app.cache_highlights(scroll, height, highlighted.clone());
-            highlighted
+        let mut result = Vec::with_capacity(height);
+        for i in 0..height {
+            let line_idx = scroll + i;
+            if let Some(cached) = app.get_cached_highlight(line_idx) {
+                result.push(cached.clone());
+            } else if line_idx < app.rendered_lines.len() {
+                let line = app.rendered_lines[line_idx].clone();
+                let _is_current = current_match_line == Some(line_idx);
+                let lowercased = app.line_lower_ref(line_idx).unwrap_or_else(|| {
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                        .to_lowercase()
+                });
+                let highlighted = apply_search_highlight(
+                    vec![line],
+                    &app.search_query,
+                    current_match_line,
+                    line_idx,
+                    Some(std::slice::from_ref(&lowercased)),
+                );
+                if let Some(hl_line) = highlighted.into_iter().next() {
+                    app.cache_highlight(line_idx, hl_line.clone());
+                    result.push(hl_line);
+                }
+            }
         }
+        result
     };
 
     let paragraph = Paragraph::new(Text::from(visible_lines)).wrap(Wrap { trim: false });

@@ -153,8 +153,7 @@ pub fn parse(markdown: &str) -> Document {
             Event::Start(Tag::BlockQuote(_)) => {
                 pos += 1;
                 let mut children: Vec<DocNode> = Vec::new();
-                let depth = 0usize;
-                collect_blockquote(&events, &mut pos, &mut children, depth);
+                collect_blockquote(&events, &mut pos, &mut children);
                 doc.nodes.push(DocNode::BlockQuote(children));
                 doc.nodes.push(DocNode::Blank);
             }
@@ -269,19 +268,18 @@ fn collect_inline_spans(
                 });
             }
             Event::Text(t) => {
-                let s = t.to_string();
                 if link_url.is_some() {
-                    link_text.push_str(&s);
+                    link_text.push_str(t);
                 } else if bold && italic {
-                    spans.push(InlineSpan::BoldItalic(s));
+                    spans.push(InlineSpan::BoldItalic(t.to_string()));
                 } else if bold {
-                    spans.push(InlineSpan::Bold(s));
+                    spans.push(InlineSpan::Bold(t.to_string()));
                 } else if italic {
-                    spans.push(InlineSpan::Italic(s));
+                    spans.push(InlineSpan::Italic(t.to_string()));
                 } else if strike {
-                    spans.push(InlineSpan::Strikethrough(s));
+                    spans.push(InlineSpan::Strikethrough(t.to_string()));
                 } else {
-                    spans.push(InlineSpan::Text(s));
+                    spans.push(InlineSpan::Text(t.to_string()));
                 }
             }
             Event::Code(t) => {
@@ -312,12 +310,7 @@ fn collect_image_alt_text(events: &[Event], pos: &mut usize) -> String {
     alt
 }
 
-fn collect_blockquote(
-    events: &[Event],
-    pos: &mut usize,
-    children: &mut Vec<DocNode>,
-    depth: usize,
-) {
+fn collect_blockquote(events: &[Event], pos: &mut usize, children: &mut Vec<DocNode>) {
     while *pos < events.len() {
         match &events[*pos] {
             Event::End(TagEnd::BlockQuote(_)) => break,
@@ -386,7 +379,7 @@ fn collect_blockquote(
             Event::Start(Tag::BlockQuote(_)) => {
                 *pos += 1;
                 let mut nested_children = Vec::new();
-                collect_blockquote(events, pos, &mut nested_children, depth + 1);
+                collect_blockquote(events, pos, &mut nested_children);
                 children.push(DocNode::BlockQuote(nested_children));
                 children.push(DocNode::Blank);
             }
@@ -394,7 +387,7 @@ fn collect_blockquote(
                 let ordered = start_num.is_some();
                 let mut counter = start_num.unwrap_or(1);
                 *pos += 1;
-                collect_list_items(events, pos, children, depth, ordered, &mut counter);
+                collect_list_items(events, pos, children, 0, ordered, &mut counter);
                 children.push(DocNode::Blank);
             }
             Event::Start(Tag::Table(_)) => {

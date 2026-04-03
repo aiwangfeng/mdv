@@ -5,9 +5,13 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use syntect::{
-    easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet, util::LinesWithEndings,
+    easy::HighlightLines,
+    highlighting::{Style as SyntectStyle, ThemeSet},
+    parsing::SyntaxSet,
+    util::LinesWithEndings,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -16,6 +20,9 @@ use crate::theme::Theme;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+static HL_CACHE: OnceLock<
+    std::sync::Mutex<HashMap<(String, String), Vec<(SyntectStyle, String)>>>,
+> = OnceLock::new();
 pub const IMAGE_RENDER_HEIGHT: usize = 10;
 
 #[derive(Debug)]
@@ -31,6 +38,11 @@ fn get_syntax_set() -> &'static SyntaxSet {
 
 fn get_theme_set() -> &'static ThemeSet {
     THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
+
+fn get_hl_cache(
+) -> &'static std::sync::Mutex<HashMap<(String, String), Vec<(SyntectStyle, String)>>> {
+    HL_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 /// Render a list of DocNodes into a flat list of ratatui Lines.
@@ -273,22 +285,50 @@ fn render_code_block(
         Span::styled(format!(" {}", top_right), border_style),
     ]));
 
-    // Try syntax highlighting
-    let ss = get_syntax_set();
-    let ts = get_theme_set();
-    let syntax = ss
-        .find_syntax_by_token(lang_label)
-        .unwrap_or_else(|| ss.find_syntax_plain_text());
-    let theme = &ts.themes["base16-ocean.dark"];
-    let mut highlighter = HighlightLines::new(syntax, theme);
+    let cache_key = (lang_label.to_string(), code.to_string());
+    let cached_regions = get_hl_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned());
 
-    for line_str in LinesWithEndings::from(code) {
-        let hl_result = highlighter.highlight_line(line_str, ss);
-        let mut spans: Vec<Span<'static>> = vec![Span::styled("│ ", border_style)];
+    let regions_to_render: Vec<(SyntectStyle, String)> = if let Some(cached) = cached_regions {
+        cached
+    } else {
+        let ss = get_syntax_set();
+        let ts = get_theme_set();
+        let syntax = ss
+            .find_syntax_by_token(lang_label)
+            .unwrap_or_else(|| ss.find_syntax_plain_text());
+        let theme = &ts.themes["base16-ocean.dark"];
+        let mut highlighter = HighlightLines::new(syntax, theme);
 
-        match hl_result {
-            Ok(regions) => {
-                for (style, text) in regions {
+        let mut all_regions = Vec::new();
+        for line_str in LinesWithEndings::from(code) {
+            match highlighter.highlight_line(line_str, ss) {
+                Ok(regions) => {
+                    all_regions.extend(regions.into_iter().map(|(s, t)| (s, t.to_string())));
+                }
+                Err(_) => {
+                    all_regions.push((
+                        SyntectStyle::default(),
+                        line_str.trim_end_matches('\n').to_string(),
+                    ));
+                }
+            }
+        }
+
+        if let Ok(mut cache) = get_hl_cache().lock() {
+            cache.insert(cache_key, all_regions.clone());
+        }
+        all_regions
+    };
+
+    let mut current_line_spans: Vec<Span<'static>> = vec![Span::styled("│ ", border_style)];
+    for (style, text) in regions_to_render {
+        if text.ends_with('\n') {
+            if !text.is_empty() {
+                let trimmed = text.trim_end_matches('\n');
+                if !trimmed.is_empty() {
                     let fg = syntect_color_to_ratatui(style.foreground);
                     let bold = style
                         .font_style
@@ -303,21 +343,34 @@ fn render_code_block(
                     if italic {
                         s = s.add_modifier(Modifier::ITALIC);
                     }
-                    // trim trailing newline from syntect
-                    let t = text.trim_end_matches('\n').to_string();
-                    if !t.is_empty() {
-                        spans.push(Span::styled(t, s));
-                    }
+                    current_line_spans.push(Span::styled(trimmed.to_string(), s));
                 }
             }
-            Err(_) => {
-                spans.push(Span::styled(
-                    line_str.trim_end_matches('\n').to_string(),
-                    Theme::text(),
-                ));
+            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+            current_line_spans = vec![Span::styled("│ ", border_style)];
+        } else {
+            if text.is_empty() {
+                continue;
             }
+            let fg = syntect_color_to_ratatui(style.foreground);
+            let bold = style
+                .font_style
+                .contains(syntect::highlighting::FontStyle::BOLD);
+            let italic = style
+                .font_style
+                .contains(syntect::highlighting::FontStyle::ITALIC);
+            let mut s = Style::default().fg(fg);
+            if bold {
+                s = s.add_modifier(Modifier::BOLD);
+            }
+            if italic {
+                s = s.add_modifier(Modifier::ITALIC);
+            }
+            current_line_spans.push(Span::styled(text, s));
         }
-        lines.push(Line::from(spans));
+    }
+    if current_line_spans.len() > 1 {
+        lines.push(Line::from(current_line_spans));
     }
 
     // Bottom border
@@ -419,11 +472,31 @@ fn compute_col_widths(
     let avail = max_width.saturating_sub(overhead);
     let total: usize = widths.iter().sum();
     if total > avail && avail > 0 {
-        let scale = avail as f64 / total as f64;
-        widths = widths
-            .iter()
-            .map(|&w| ((w as f64 * scale).floor() as usize).max(3))
-            .collect();
+        // Give each column a fair minimum based on its content, then distribute
+        // remaining space proportionally among columns that can shrink more.
+        let min_per_col = 4;
+        let guaranteed = ncols * min_per_col;
+        if avail < guaranteed {
+            // Not enough space for minimums — distribute equally
+            let equal = (avail / ncols).max(3);
+            widths = vec![equal; ncols];
+        } else {
+            let remaining = avail - guaranteed;
+            let shrinkable: usize = widths.iter().map(|&w| w.saturating_sub(min_per_col)).sum();
+            if shrinkable == 0 {
+                widths = vec![min_per_col; ncols];
+            } else {
+                let scale = remaining as f64 / shrinkable as f64;
+                widths = widths
+                    .iter()
+                    .map(|&w| {
+                        let extra =
+                            ((w.saturating_sub(min_per_col)) as f64 * scale).floor() as usize;
+                        (min_per_col + extra).max(3)
+                    })
+                    .collect();
+            }
+        }
     }
     widths
 }
@@ -607,31 +680,26 @@ fn highlight_span(
     hl_style: Style,
 ) {
     let text = span.content.to_string();
+    let text_lower = text.to_lowercase();
     let base_style = span.style;
-    let mut chars = text.char_indices().peekable();
-    let mut slice_start = 0usize;
+    let query_len = query.chars().count();
+    let mut offset = 0usize;
 
-    while let Some((idx, _)) = chars.next() {
-        let candidate = &text[idx..];
-        if candidate.to_lowercase().starts_with(query_lower) {
-            if slice_start < idx {
-                new_spans.push(Span::styled(text[slice_start..idx].to_string(), base_style));
-            }
-            let end = nth_char_boundary(candidate, query.chars().count());
-            new_spans.push(Span::styled(candidate[..end].to_string(), hl_style));
-            slice_start = idx + end;
-            while let Some(&(next_idx, _)) = chars.peek() {
-                if next_idx < slice_start {
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
+    while let Some(idx) = text_lower[offset..].find(query_lower) {
+        let abs_idx = offset + idx;
+        if offset < abs_idx {
+            new_spans.push(Span::styled(text[offset..abs_idx].to_string(), base_style));
         }
+        let end = nth_char_boundary(&text[abs_idx..], query_len);
+        new_spans.push(Span::styled(
+            text[abs_idx..abs_idx + end].to_string(),
+            hl_style,
+        ));
+        offset = abs_idx + end;
     }
 
-    if slice_start < text.len() {
-        new_spans.push(Span::styled(text[slice_start..].to_string(), base_style));
+    if offset < text.len() {
+        new_spans.push(Span::styled(text[offset..].to_string(), base_style));
     }
 }
 
