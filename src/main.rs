@@ -246,6 +246,8 @@ fn run(
             needs_redraw = false;
         }
 
+        app.tick_toast();
+
         if img_mgr.process_incoming() {
             needs_redraw = true;
         }
@@ -319,6 +321,9 @@ fn spawn_input_thread(tx: mpsc::Sender<AppEvent>, stop: Arc<AtomicBool>) -> thre
 fn handle_app_event(app: &mut App, event: AppEvent) -> bool {
     match event {
         AppEvent::Key { code, modifiers } => {
+            if app.first_run {
+                app.first_run = false;
+            }
             handle_key(app, code, modifiers);
             true
         }

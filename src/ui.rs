@@ -20,6 +20,7 @@ use crate::config;
 use crate::image_proto::ImageManager;
 use crate::renderer::{apply_search_highlight, IMAGE_RENDER_HEIGHT};
 use crate::theme::Theme;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
     let area = frame.area();
@@ -61,10 +62,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
 
     // ── Overlays ────────────────────────────────────────────────────────────
     match app.mode {
-        Mode::Help => draw_help_overlay(frame, area),
+        Mode::Help => draw_help_overlay(frame, app, area),
         Mode::Search => draw_search_bar(frame, app, area),
         Mode::ThemePicker => draw_theme_overlay(frame, app, area),
         Mode::Normal => {}
+    }
+
+    // ── Toast notification ─────────────────────────────────────────────────
+    if let Some(ref toast) = app.toast {
+        draw_toast(frame, toast, area);
+    }
+
+    // ── First-run hint ─────────────────────────────────────────────────────
+    if app.first_run {
+        draw_first_run_hint(frame, area);
     }
 }
 
@@ -284,9 +295,29 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     ]);
 
     let theme_name = config::current_theme_name();
+    let keys = config::keymap();
+    let key_label = |binding: config::KeyBinding| -> String {
+        match binding.code {
+            KeyCode::Char(c) => c.to_string(),
+            _ => "?".to_string(),
+        }
+    };
     let keys_text = format!(
-        " q:quit  ?:help  /:search  s:toc  h/l:focus  j/k:scroll  t:theme({}) ",
-        theme_name
+        " {}:{}  {}:{}  {}:{}  {}:{}  {}/{}:focus  {}/{}:scroll  {}:theme({}) ",
+        key_label(keys.quit),
+        "quit",
+        key_label(keys.help),
+        "help",
+        key_label(keys.search),
+        "search",
+        key_label(keys.toggle_toc),
+        "toc",
+        key_label(keys.focus_prev),
+        key_label(keys.focus_next),
+        key_label(keys.up),
+        key_label(keys.down),
+        key_label(keys.next_theme),
+        theme_name,
     );
     let right_text = format!(" {}% ", scroll_pct);
     let right = format!("{}{}", keys_text, right_text);
@@ -332,49 +363,121 @@ fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 // Help overlay
 // ---------------------------------------------------------------------------
 
-fn draw_help_overlay(frame: &mut Frame, area: Rect) {
-    let width = (area.width / 2).max(50).min(area.width);
-    let height = (area.height / 2).max(28).min(area.height);
-    let x = (area.width - width) / 2;
-    let y = (area.height - height) / 2;
+fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
+    let keys = config::keymap();
+    let fmt = |binding: config::KeyBinding| -> String {
+        let mods = binding.modifiers;
+        let mut parts = Vec::new();
+        if mods.contains(KeyModifiers::CONTROL) {
+            parts.push("C");
+        }
+        if mods.contains(KeyModifiers::ALT) {
+            parts.push("A");
+        }
+        let key = match binding.code {
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Up => "↑".to_string(),
+            KeyCode::Down => "↓".to_string(),
+            KeyCode::Left => "←".to_string(),
+            KeyCode::Right => "→".to_string(),
+            KeyCode::Esc => "Esc".to_string(),
+            KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Backspace => "Bksp".to_string(),
+            KeyCode::Tab => "Tab".to_string(),
+            _ => "?".to_string(),
+        };
+        if parts.is_empty() {
+            key
+        } else {
+            format!("{}-{}", parts.join("-"), key)
+        }
+    };
+
+    let items: Vec<(String, &str)> = vec![
+        (fmt(keys.down), "Scroll down"),
+        (fmt(keys.up), "Scroll up"),
+        (fmt(keys.page_down), "Half-page down"),
+        (fmt(keys.page_up), "Half-page up"),
+        (fmt(keys.top), "Go to top"),
+        (fmt(keys.bottom), "Go to bottom"),
+        (fmt(keys.focus_prev), "Focus TOC"),
+        (fmt(keys.focus_next), "Focus Content"),
+        (fmt(keys.toc_down), "TOC down"),
+        (fmt(keys.toc_up), "TOC up"),
+        ("Enter".to_string(), "Jump to TOC entry"),
+        ("]".to_string(), "Next heading"),
+        ("[".to_string(), "Prev heading"),
+        (fmt(keys.toggle_toc), "Toggle TOC"),
+        ("< / >".to_string(), "Narrow/Widen TOC"),
+        (fmt(keys.search), "Start search"),
+        (fmt(keys.search_next), "Next search match"),
+        (fmt(keys.search_prev), "Prev search match"),
+        (fmt(keys.next_theme), "Theme picker"),
+        (fmt(keys.help), "Toggle help"),
+        (fmt(keys.quit), "Quit"),
+        ("Esc".to_string(), "Cancel / Close"),
+    ];
+
+    let max_key_width = items.iter().map(|(k, _)| k.width()).max().unwrap_or(10);
+    let col_width = max_key_width + 4;
+    let half = (items.len() + 1) / 2;
+    let left_items = &items[..half];
+    let right_items = &items[half..];
+
+    let help_height = 4 + half.max(right_items.len()) as u16;
+    let help_width = ((col_width * 2 + 12) as u16)
+        .min(area.width.saturating_sub(4))
+        .max(50);
+    let x = area.width.saturating_sub(help_width) / 2;
+    let y = area.height.saturating_sub(help_height) / 2;
     let help_area = Rect {
         x,
         y,
-        width,
-        height,
+        width: help_width,
+        height: help_height,
     };
 
     frame.render_widget(Clear, help_area);
 
-    let items: Vec<(&str, &str)> = vec![
-        ("j / k", "Scroll down / up"),
-        ("d / u", "Half-page down / up"),
-        ("g / G", "Top / bottom"),
-        ("h / l", "Switch focus (TOC ↔ Content)"),
-        ("J / K", "Move TOC cursor (in TOC)"),
-        ("Enter", "Jump to TOC entry"),
-        ("[ / ]", "Prev / next heading"),
-        ("s", "Toggle TOC sidebar"),
-        ("</>", "Narrow / widen TOC"),
-        ("/", "Start search"),
-        ("n / N", "Next / prev search match"),
-        ("t", "Open theme picker"),
-        ("Esc", "Cancel search / close overlay"),
-        ("?", "Toggle this help"),
-        ("q / Ctrl-C", "Quit"),
-    ];
+    let build_list = |items: &[(String, &str)]| -> Vec<Line> {
+        items
+            .iter()
+            .map(|(key, desc)| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:>width$}  ", key, width = max_key_width),
+                        Theme::statusbar_key(),
+                    ),
+                    Span::styled(desc.to_string(), Theme::text()),
+                ])
+            })
+            .collect()
+    };
 
-    let help_lines: Vec<Line> = std::iter::once(Line::from(Span::styled(
+    let left_lines = build_list(left_items);
+    let right_lines = build_list(right_items);
+
+    let combined: Vec<Line> = std::iter::once(Line::from(Span::styled(
         " Keybindings ",
         Theme::toc_title(),
     )))
     .chain(std::iter::once(Line::default()))
-    .chain(items.iter().map(|(key, desc)| {
-        Line::from(vec![
-            Span::styled(format!("  {:>12}  ", key), Theme::statusbar_key()),
-            Span::styled(desc.to_string(), Theme::text()),
-        ])
-    }))
+    .chain(
+        left_lines
+            .into_iter()
+            .zip(
+                right_lines
+                    .into_iter()
+                    .chain(std::iter::repeat(Line::default())),
+            )
+            .map(|(left, right)| {
+                let pad = " ".repeat(2);
+                let mut spans = left.spans;
+                spans.push(Span::raw(pad));
+                spans.extend(right.spans);
+                Line::from(spans)
+            }),
+    )
     .chain(std::iter::once(Line::default()))
     .chain(std::iter::once(Line::from(Span::styled(
         "  Press ? or Esc to close ",
@@ -388,7 +491,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         .border_style(Theme::toc_border_focused())
         .title(Span::styled(" mdv help ", Theme::toc_title()));
 
-    let para = Paragraph::new(Text::from(help_lines))
+    let para = Paragraph::new(Text::from(combined))
         .block(block)
         .wrap(Wrap { trim: false });
 
@@ -472,4 +575,60 @@ fn draw_theme_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ]),
     ]));
     frame.render_widget(hint, hint_area);
+}
+
+// ---------------------------------------------------------------------------
+// Toast notification
+// ---------------------------------------------------------------------------
+
+fn draw_toast(frame: &mut Frame, toast: &crate::app::Toast, area: Rect) {
+    let width = (toast.message.width() as u16 + 6)
+        .min(area.width.saturating_sub(4))
+        .max(20);
+    let height = 3;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = area.height.saturating_sub(height + 3);
+    let toast_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, toast_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::toc_border_focused());
+
+    let para = Paragraph::new(Text::from(vec![Line::from(Span::styled(
+        &toast.message,
+        Theme::toc_selected(),
+    ))]))
+    .block(block)
+    .alignment(ratatui::layout::Alignment::Center);
+
+    frame.render_widget(para, toast_area);
+}
+
+// ---------------------------------------------------------------------------
+// First-run hint
+// ---------------------------------------------------------------------------
+
+fn draw_first_run_hint(frame: &mut Frame, area: Rect) {
+    let hint = "? for help";
+    let width = hint.width() as u16 + 4;
+    let height = 1;
+    let x = area.width.saturating_sub(width + 1);
+    let y = area.height.saturating_sub(height + 2);
+    let hint_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    let para = Paragraph::new(Text::from(Span::styled(hint, Theme::subtext())));
+    frame.render_widget(para, hint_area);
 }

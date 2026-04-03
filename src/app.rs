@@ -4,6 +4,7 @@
 use ratatui::text::Line;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::parser::Document;
 
@@ -19,6 +20,27 @@ pub enum Mode {
     Search,
     Help,
     ThemePicker,
+}
+
+#[derive(Debug)]
+pub struct Toast {
+    pub message: String,
+    pub created_at: Instant,
+    pub duration: Duration,
+}
+
+impl Toast {
+    pub fn new(message: &str, duration_ms: u64) -> Self {
+        Self {
+            message: message.to_string(),
+            created_at: Instant::now(),
+            duration: Duration::from_millis(duration_ms),
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() > self.duration
+    }
 }
 
 #[derive(Debug)]
@@ -53,6 +75,9 @@ pub struct App {
     cached_search_query: Option<String>,
     pub theme_picker_index: usize,
     theme_picker_origin: Option<usize>,
+
+    pub toast: Option<Toast>,
+    pub first_run: bool,
 
     pub quit: bool,
 }
@@ -95,6 +120,8 @@ impl App {
             cached_search_query: None,
             theme_picker_index: 0,
             theme_picker_origin: None,
+            toast: None,
+            first_run: true,
             quit: false,
         }
     }
@@ -348,16 +375,36 @@ impl App {
     // Layout helpers
     // ---------------------------------------------------------------------------
 
+    pub fn show_toast(&mut self, message: &str) {
+        self.toast = Some(Toast::new(message, 1500));
+    }
+
+    pub fn tick_toast(&mut self) {
+        if let Some(ref toast) = self.toast {
+            if toast.is_expired() {
+                self.toast = None;
+            }
+        }
+    }
+
     pub fn toggle_toc(&mut self) {
         self.show_toc = !self.show_toc;
+        let status = if self.show_toc {
+            "TOC shown"
+        } else {
+            "TOC hidden"
+        };
+        self.show_toast(status);
     }
 
     pub fn widen_toc(&mut self) {
         self.toc_width_pct = (self.toc_width_pct + 2).min(50);
+        self.show_toast(&format!("TOC width: {}%", self.toc_width_pct));
     }
 
     pub fn narrow_toc(&mut self) {
         self.toc_width_pct = (self.toc_width_pct.saturating_sub(2)).max(10);
+        self.show_toast(&format!("TOC width: {}%", self.toc_width_pct));
     }
 
     pub fn toggle_focus(&mut self) {
