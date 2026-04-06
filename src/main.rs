@@ -3,6 +3,7 @@
 
 mod app;
 mod config;
+mod dir;
 mod image_proto;
 mod parser;
 mod renderer;
@@ -61,9 +62,9 @@ const RESIZE_DEBOUNCE_MS: u64 = 50;
     long_about = None,
 )]
 struct Cli {
-    /// Markdown file to open
-    #[arg(value_name = "FILE")]
-    file: PathBuf,
+    /// Markdown file or directory to open
+    #[arg(value_name = "PATH")]
+    path: Option<PathBuf>,
 
     /// Disable inline image rendering
     #[arg(long, default_value_t = false)]
@@ -87,55 +88,73 @@ fn main() -> Result<()> {
     config::load()?;
     let cli = Cli::parse();
 
-    let metadata = fs::metadata(&cli.file)
-        .with_context(|| format!("Cannot access '{}'", cli.file.display()))?;
+    let mut app = if let Some(path) = &cli.path {
+        let metadata = match fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) => {
+                anyhow::bail!("Cannot access '{}': {}", path.display(), e);
+            }
+        };
 
-    if metadata.len() > MAX_FILE_SIZE {
-        anyhow::bail!(
-            "File '{}' is too large ({} bytes). Maximum size is {} bytes.",
-            cli.file.display(),
-            metadata.len(),
-            MAX_FILE_SIZE
-        );
-    }
-
-    let markdown = fs::read_to_string(&cli.file)
-        .with_context(|| format!("Cannot read '{}'", cli.file.display()))?;
-
-    // Parse document
-    let document = parser::parse(&markdown);
-
-    // Pre-render lines at a nominal width (will re-render on first frame)
-    let initial_width = 80u16;
-    let RenderResult {
-        lines: rendered_lines,
-        image_positions,
-        node_line_starts,
-    } = renderer::render_nodes(&document.nodes, initial_width, initial_width);
-    let toc_line_indices = document
-        .toc
-        .iter()
-        .map(|entry| node_line_starts.get(entry.node_index).copied().unwrap_or(0))
-        .collect();
+        if metadata.is_dir() {
+            // Directory mode
+            let dir_files = dir::scan_markdown_files(path);
+            if dir_files.is_empty() {
+                anyhow::bail!("No markdown files found in '{}'", path.display());
+            }
+            App::new_directory_mode(path.clone(), dir_files)
+        } else {
+            // Single file mode
+            if metadata.len() > MAX_FILE_SIZE {
+                anyhow::bail!(
+                    "File '{}' is too large ({} bytes). Maximum size is {} bytes.",
+                    path.display(),
+                    metadata.len(),
+                    MAX_FILE_SIZE
+                );
+            }
+            let markdown = fs::read_to_string(path)
+                .with_context(|| format!("Cannot read '{}'", path.display()))?;
+            let document = parser::parse(&markdown);
+            let initial_width = 80u16;
+            let RenderResult {
+                lines: rendered_lines,
+                image_positions,
+                node_line_starts,
+            } = renderer::render_nodes(&document.nodes, initial_width, initial_width);
+            let toc_line_indices = document
+                .toc
+                .iter()
+                .map(|entry| node_line_starts.get(entry.node_index).copied().unwrap_or(0))
+                .collect();
+            App::new(
+                path.clone(),
+                document,
+                rendered_lines,
+                image_positions,
+                toc_line_indices,
+            )
+        }
+    } else {
+        // No path specified, use current directory
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let dir_files = dir::scan_markdown_files(&cwd);
+        if dir_files.is_empty() {
+            anyhow::bail!("No markdown files found in current directory");
+        }
+        App::new_directory_mode(cwd, dir_files)
+    };
 
     // Image manager
     let mut img_mgr = ImageManager::new(cli.no_images);
 
-    // Pre-load images (asynchronously)
-    if img_mgr.is_enabled() {
-        let base_dir = get_base_dir(&cli.file);
-        for (_, src, _) in &image_positions {
+    // Pre-load images for the current file (if any)
+    if img_mgr.is_enabled() && !app.directory_mode {
+        let base_dir = get_base_dir(&app.file_path);
+        for (_, src, _) in &app.image_positions {
             img_mgr.load_async(src, base_dir);
         }
     }
-
-    let mut app = App::new(
-        cli.file.clone(),
-        document,
-        rendered_lines,
-        image_positions,
-        toc_line_indices,
-    );
 
     // ── Terminal setup ───────────────────────────────────────────────────────
     enable_raw_mode()?;
@@ -165,7 +184,9 @@ fn main() -> Result<()> {
         eprintln!("Warning: Failed to show cursor: {}", e);
     }
     stop_input.store(true, Ordering::Relaxed);
-    let _ = input_thread.join();
+    if let Err(e) = input_thread.join() {
+        eprintln!("Warning: Input thread panicked: {:?}", e);
+    }
 
     result
 }
@@ -236,7 +257,7 @@ fn run(
                     resize_deadline =
                         Some(Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
                 }
-                needs_redraw |= handle_app_event(app, event);
+                needs_redraw |= handle_app_event(app, img_mgr, event);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
@@ -247,7 +268,7 @@ fn run(
                 pending_resize = Some((w, h));
                 resize_deadline = Some(Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
             }
-            needs_redraw |= handle_app_event(app, message);
+            needs_redraw |= handle_app_event(app, img_mgr, message);
         }
 
         if app.quit {
@@ -295,13 +316,13 @@ fn spawn_input_thread(tx: mpsc::Sender<AppEvent>, stop: Arc<AtomicBool>) -> thre
     })
 }
 
-fn handle_app_event(app: &mut App, event: AppEvent) -> bool {
+fn handle_app_event(app: &mut App, img_mgr: &mut ImageManager, event: AppEvent) -> bool {
     match event {
         AppEvent::Key { code, modifiers } => {
             if app.first_run {
                 app.first_run = false;
             }
-            handle_key(app, code, modifiers);
+            handle_key(app, img_mgr, code, modifiers);
             true
         }
         AppEvent::Resize(_, _) => true,
@@ -316,18 +337,53 @@ fn handle_app_event(app: &mut App, event: AppEvent) -> bool {
 // Key handling
 // ---------------------------------------------------------------------------
 
-fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_key(app: &mut App, img_mgr: &mut ImageManager, code: KeyCode, modifiers: KeyModifiers) {
     match app.mode {
         Mode::Search => handle_search_key(app, code, modifiers),
         Mode::Help => handle_help_key(app, code, modifiers),
         Mode::ThemePicker => handle_theme_picker_key(app, code, modifiers),
-        Mode::Normal => handle_normal_key(app, code, modifiers),
+        Mode::Normal => handle_normal_key(app, img_mgr, code, modifiers),
     }
 }
 
-fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_normal_key(
+    app: &mut App,
+    img_mgr: &mut ImageManager,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) {
     if code == KeyCode::Null {
         return;
+    }
+
+    // Directory mode key handling
+    if app.is_directory_mode() {
+        let keys = config::keymap();
+        match app.dir_view {
+            crate::app::DirView::FileList => {
+                match code {
+                    c if keys.quit.matches(c, modifiers) => app.quit = true,
+                    c if keys.down.matches(c, modifiers) => app.dir_down(),
+                    c if keys.up.matches(c, modifiers) => app.dir_up(),
+                    c if keys.top.matches(c, modifiers) => app.dir_top(),
+                    c if keys.bottom.matches(c, modifiers) => app.dir_bottom(),
+                    KeyCode::Enter if modifiers.is_empty() => {
+                        let cursor = app.dir_cursor;
+                        let base_dir = app.dir_base.clone();
+                        let _ = app.open_file_from_dir(cursor, &base_dir, img_mgr);
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            crate::app::DirView::FileView => match code {
+                KeyCode::Esc | KeyCode::Backspace => {
+                    app.return_to_file_list();
+                    return;
+                }
+                _ => {}
+            },
+        }
     }
 
     let keys = config::keymap();

@@ -3,7 +3,8 @@
 
 use ratatui::text::Line;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config;
@@ -21,6 +22,20 @@ pub enum Mode {
     Search,
     Help,
     ThemePicker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirView {
+    FileList,
+    FileView,
+}
+
+#[derive(Debug, Default)]
+pub struct CachedDocument {
+    pub document: Arc<Document>,
+    pub rendered_lines: Arc<Vec<Line<'static>>>,
+    pub image_positions: Vec<(usize, String, String)>,
+    pub toc_line_indices: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -49,8 +64,8 @@ pub struct App {
     pub file_path: PathBuf,
     pub file_name: String,
 
-    pub document: Document,
-    pub rendered_lines: Vec<Line<'static>>,
+    pub document: Arc<Document>,
+    pub rendered_lines: Arc<Vec<Line<'static>>>,
     rendered_texts_lower: HashMap<usize, String>,
     pub image_positions: Vec<(usize, String, String)>,
     pub toc_line_indices: Vec<usize>,
@@ -82,6 +97,17 @@ pub struct App {
     pub first_run: bool,
 
     pub quit: bool,
+
+    // Directory mode
+    pub directory_mode: bool,
+    pub dir_view: DirView,
+    pub dir_files: Vec<crate::dir::DirEntry>,
+    pub dir_base: PathBuf,
+    pub dir_cursor: usize,
+    pub dir_scroll: usize,
+    pub current_file_index: Option<usize>,
+    pub file_cache: HashMap<usize, CachedDocument>,
+    pub scroll_positions: HashMap<usize, usize>,
 }
 
 impl App {
@@ -101,8 +127,8 @@ impl App {
         Self {
             file_path,
             file_name,
-            document,
-            rendered_lines,
+            document: Arc::new(document),
+            rendered_lines: Arc::new(rendered_lines),
             rendered_texts_lower: HashMap::new(),
             image_positions,
             toc_line_indices,
@@ -127,6 +153,61 @@ impl App {
             toast: None,
             first_run: true,
             quit: false,
+            directory_mode: false,
+            dir_view: DirView::FileView,
+            dir_files: vec![],
+            dir_base: PathBuf::new(),
+            dir_cursor: 0,
+            dir_scroll: 0,
+            current_file_index: None,
+            file_cache: HashMap::new(),
+            scroll_positions: HashMap::new(),
+        }
+    }
+
+    pub fn new_directory_mode(dir_base: PathBuf, dir_files: Vec<crate::dir::DirEntry>) -> Self {
+        let cfg = config::get();
+        Self {
+            file_path: PathBuf::new(),
+            file_name: dir_base
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "mdv".to_string()),
+            document: Arc::new(Document::default()),
+            rendered_lines: Arc::new(vec![]),
+            rendered_texts_lower: HashMap::new(),
+            image_positions: vec![],
+            toc_line_indices: vec![],
+            toc_width_pct: cfg.toc_width_pct,
+            show_toc: true,
+            focus: Focus::Toc,
+            scroll: 0,
+            content_height: 0,
+            content_width: 0,
+            full_content_width: 0,
+            toc_cursor: 0,
+            toc_scroll: 0,
+            toc_height: 0,
+            mode: Mode::Normal,
+            search_query: String::new(),
+            search_matches: vec![],
+            search_current: 0,
+            search_highlight_cache: HashMap::new(),
+            cached_search_query: None,
+            theme_picker_index: 0,
+            theme_picker_origin: None,
+            toast: None,
+            first_run: false,
+            quit: false,
+            directory_mode: true,
+            dir_view: DirView::FileList,
+            dir_files,
+            dir_base,
+            dir_cursor: 0,
+            dir_scroll: 0,
+            current_file_index: None,
+            file_cache: HashMap::new(),
+            scroll_positions: HashMap::new(),
         }
     }
 
@@ -485,7 +566,7 @@ impl App {
         node_line_starts: &[usize],
     ) {
         self.rendered_texts_lower.clear();
-        self.rendered_lines = rendered_lines;
+        self.rendered_lines = Arc::new(rendered_lines);
         self.image_positions = image_positions;
         self.toc_line_indices = self
             .document
@@ -497,6 +578,141 @@ impl App {
         self.invalidate_search_cache();
         self.sync_toc_to_scroll();
     }
+
+    // ---------------------------------------------------------------------------
+    // Directory mode methods
+    // ---------------------------------------------------------------------------
+
+    pub fn is_directory_mode(&self) -> bool {
+        self.directory_mode
+    }
+
+    pub fn dir_up(&mut self) {
+        if !self.directory_mode || self.dir_files.is_empty() {
+            return;
+        }
+        self.dir_cursor = self.dir_cursor.saturating_sub(1);
+        if self.dir_cursor < self.dir_scroll {
+            self.dir_scroll = self.dir_cursor;
+        }
+    }
+
+    pub fn dir_down(&mut self) {
+        if !self.directory_mode || self.dir_files.is_empty() {
+            return;
+        }
+        self.dir_cursor = (self.dir_cursor + 1).min(self.dir_files.len() - 1);
+        let visible = self.toc_height as usize;
+        if self.dir_cursor >= self.dir_scroll + visible {
+            self.dir_scroll = self.dir_cursor.saturating_sub(visible - 1);
+        }
+    }
+
+    pub fn dir_top(&mut self) {
+        self.dir_cursor = 0;
+        self.dir_scroll = 0;
+    }
+
+    pub fn dir_bottom(&mut self) {
+        if self.dir_files.is_empty() {
+            return;
+        }
+        self.dir_cursor = self.dir_files.len() - 1;
+        let visible = self.toc_height as usize;
+        self.dir_scroll = self.dir_cursor.saturating_sub(visible - 1);
+    }
+
+    pub fn open_file_from_dir(
+        &mut self,
+        file_index: usize,
+        base_dir: &Path,
+        img_mgr: &mut crate::image_proto::ImageManager,
+    ) -> bool {
+        if file_index >= self.dir_files.len() {
+            return false;
+        }
+
+        let entry = &self.dir_files[file_index];
+        let path = &entry.path;
+
+        let markdown = match std::fs::read_to_string(path) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("Failed to read {}: {}", path.display(), e);
+                return false;
+            }
+        };
+
+        let document = crate::parser::parse(&markdown);
+        let initial_width = 80u16;
+        let result = crate::renderer::render_nodes(&document.nodes, initial_width, initial_width);
+
+        if let Some(cached) = self.file_cache.get(&file_index) {
+            self.document = Arc::clone(&cached.document);
+            self.rendered_lines = Arc::clone(&cached.rendered_lines);
+            self.image_positions = cached.image_positions.clone();
+            self.toc_line_indices = cached.toc_line_indices.clone();
+        } else {
+            let toc_line_indices: Vec<usize> = result
+                .node_line_starts
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| document.toc.iter().any(|e| e.node_index == *i))
+                .map(|(_, &line)| line)
+                .collect();
+            self.document = Arc::new(document);
+            self.rendered_lines = Arc::new(result.lines);
+            self.image_positions = result.image_positions;
+            self.toc_line_indices = toc_line_indices;
+
+            self.file_cache.insert(
+                file_index,
+                CachedDocument {
+                    document: Arc::clone(&self.document),
+                    rendered_lines: Arc::clone(&self.rendered_lines),
+                    image_positions: self.image_positions.clone(),
+                    toc_line_indices: self.toc_line_indices.clone(),
+                },
+            );
+        }
+
+        self.file_path = path.clone();
+        self.file_name = entry.display_name.clone();
+
+        if img_mgr.is_enabled() {
+            for (_, src, _) in &self.image_positions {
+                img_mgr.load_async(src, base_dir);
+            }
+        }
+
+        if let Some(&scroll) = self.scroll_positions.get(&file_index) {
+            self.scroll = scroll.min(self.max_scroll());
+        } else {
+            self.scroll = 0;
+        }
+
+        self.current_file_index = Some(file_index);
+        self.dir_view = DirView::FileView;
+        self.focus = Focus::Content;
+        self.invalidate_search_cache();
+        self.sync_toc_to_scroll();
+        true
+    }
+
+    pub fn return_to_file_list(&mut self) {
+        if !self.directory_mode {
+            return;
+        }
+
+        if let Some(idx) = self.current_file_index {
+            self.scroll_positions.insert(idx, self.scroll);
+        }
+
+        self.dir_view = DirView::FileList;
+        self.focus = Focus::Toc;
+        self.toc_cursor = 0;
+        self.toc_scroll = 0;
+    }
 }
 
 #[cfg(test)]
@@ -504,7 +720,7 @@ mod tests {
     use super::App;
     use crate::parser::{DocNode, Document, TocEntry};
     use ratatui::text::Line;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn update_render_maps_toc_entries_to_rendered_lines() {

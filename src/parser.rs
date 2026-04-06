@@ -59,7 +59,7 @@ pub enum InlineSpan {
     HardBreak,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Document {
     pub nodes: Vec<DocNode>,
     pub toc: Vec<TocEntry>,

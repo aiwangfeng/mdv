@@ -33,7 +33,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
     // ── Horizontal split: TOC (optional) | Content ─────────────────────────
-    let (toc_area, content_area) = if app.show_toc && app.toc_len() > 0 {
+    let show_toc = app.show_toc && (app.toc_len() > 0 || app.is_directory_mode());
+    let (toc_area, content_area) = if show_toc {
         let toc_pct = app.toc_width_pct.min(50);
         let [l, r] = Layout::horizontal([
             Constraint::Percentage(toc_pct),
@@ -95,46 +96,77 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
         Theme::toc_border()
     };
     let title_style = Theme::toc_title();
-    let synced = app.synced_toc_index();
+
+    let (title, items): (String, Vec<ListItem>) =
+        if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
+            // File list mode
+            let title = format!(" {} files ", "📁");
+            let items: Vec<ListItem> = app
+                .dir_files
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let indent = "  ".repeat(entry.depth);
+                    let text = format!("{}{}", indent, entry.display_name);
+                    let style = if i == app.dir_cursor && focused {
+                        Theme::toc_selected()
+                    } else {
+                        Theme::text()
+                    };
+                    ListItem::new(Line::from(Span::styled(text, style)))
+                })
+                .collect();
+            (title, items)
+        } else {
+            // Normal TOC mode (headings)
+            let title = format!(" {} TOC ", "📑");
+            let items: Vec<ListItem> = app
+                .document
+                .toc
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let prefix = match entry.level {
+                        1 => "▌ ",
+                        2 => "  ▎ ",
+                        _ => "    · ",
+                    };
+                    let style = if i == app.toc_cursor && focused {
+                        Theme::toc_selected()
+                    } else if Some(i) == app.synced_toc_index() {
+                        Theme::toc_synced()
+                    } else {
+                        Theme::toc_item(entry.level)
+                    };
+                    let text = format!("{}{}", prefix, entry.title);
+                    ListItem::new(Line::from(Span::styled(text, style)))
+                })
+                .collect();
+            (title, items)
+        };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(Span::styled(" 󰉻 TOC ", title_style));
+        .title(Span::styled(title, title_style));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let items: Vec<ListItem> = app
-        .document
-        .toc
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let prefix = match entry.level {
-                1 => "▌ ",
-                2 => "  ▎ ",
-                _ => "    · ",
-            };
-            let style = if i == app.toc_cursor && focused {
-                Theme::toc_selected()
-            } else if Some(i) == synced {
-                Theme::toc_synced()
-            } else {
-                Theme::toc_item(entry.level)
-            };
-            let text = format!("{}{}", prefix, entry.title);
-            ListItem::new(Line::from(Span::styled(text, style)))
-        })
-        .collect();
+    let (cursor, scroll) =
+        if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
+            (app.dir_cursor, app.dir_scroll)
+        } else {
+            (app.toc_cursor, app.toc_scroll)
+        };
 
     let mut list_state = ListState::default();
-    list_state.select(Some(app.toc_cursor.saturating_sub(app.toc_scroll)));
+    list_state.select(Some(cursor.saturating_sub(scroll)));
 
     // Render visible slice
-    let visible_start = app.toc_scroll;
-    let visible_end = (app.toc_scroll + inner.height as usize).min(items.len());
+    let visible_start = scroll;
+    let visible_end = (scroll + inner.height as usize).min(items.len());
     let visible_items: Vec<ListItem> = items
         .into_iter()
         .skip(visible_start)
@@ -157,6 +189,58 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
         Theme::content_border()
     };
     let title_style = Theme::content_title();
+
+    // File list welcome message for directory mode
+    if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
+        let title = format!("  {} ", app.file_name);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(border_style)
+            .title(Span::styled(title, title_style));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let file_count = app.dir_files.len();
+        let lines = vec![
+            Line::from(vec![Span::styled(
+                format!("  📁 Directory Mode  ",),
+                Theme::toc_title(),
+            )]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "  Select a file from the list to view its content.  ",
+                Theme::text(),
+            )]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "  ↑/↓  Navigate files  ",
+                Theme::subtext(),
+            )]),
+            Line::from(vec![Span::styled("  Enter  Open file  ", Theme::subtext())]),
+            Line::from(vec![Span::styled(
+                "  Esc  Return to file list  ",
+                Theme::subtext(),
+            )]),
+            Line::from(vec![Span::styled("  q  Quit  ", Theme::subtext())]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                format!("  {} markdown file(s) found  ", file_count),
+                Theme::bold(),
+            )]),
+        ];
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(paragraph, inner);
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+        let mut scrollbar_state = ScrollbarState::new(0).position(0);
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        return;
+    }
 
     let m = if app.search_matches.is_empty() {
         String::new()
@@ -264,11 +348,15 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
 // ---------------------------------------------------------------------------
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let mode_text = match app.mode {
-        Mode::Normal => " NORMAL ",
-        Mode::Search => " SEARCH ",
-        Mode::Help => " HELP   ",
-        Mode::ThemePicker => " THEME  ",
+    let mode_text = if app.is_directory_mode() {
+        " DIR "
+    } else {
+        match app.mode {
+            Mode::Normal => " NORMAL ",
+            Mode::Search => " SEARCH ",
+            Mode::Help => " HELP   ",
+            Mode::ThemePicker => " THEME  ",
+        }
     };
 
     let focus_text = match app.focus {

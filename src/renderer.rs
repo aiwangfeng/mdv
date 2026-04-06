@@ -627,10 +627,10 @@ fn compute_col_widths(
 
     let total_after: usize = widths.iter().sum();
     if total_after > avail {
-        let remaining = avail - total_after;
+        let remaining = total_after - avail;
         for i in 0..remaining {
-            let idx = i as usize % ncols;
-            widths[idx] = (widths[idx] - 1).max(TABLE_MIN_COL_WIDTH);
+            let idx = i % ncols;
+            widths[idx] = widths[idx].saturating_sub(1).max(TABLE_MIN_COL_WIDTH);
         }
     }
 
