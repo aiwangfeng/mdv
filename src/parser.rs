@@ -83,16 +83,7 @@ pub fn parse(markdown: &str) -> Document {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 pos += 1;
-                let mut text = String::new();
-                while let Some(e) = get_event(&events, pos) {
-                    match e {
-                        Event::Text(t) => text.push_str(t),
-                        Event::Code(t) => text.push_str(t),
-                        Event::End(TagEnd::Heading(_)) => break,
-                        _ => {}
-                    }
-                    pos += 1;
-                }
+                let text = extract_heading_text(&events, &mut pos);
                 let lvl = heading_level_to_u8(*level);
                 let node_index = doc.nodes.len();
                 doc.toc.push(TocEntry {
@@ -125,27 +116,9 @@ pub fn parse(markdown: &str) -> Document {
             }
 
             Event::Start(Tag::CodeBlock(kind)) => {
-                let language = match kind {
-                    pulldown_cmark::CodeBlockKind::Fenced(lang) => {
-                        let s = lang.to_string();
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s)
-                        }
-                    }
-                    pulldown_cmark::CodeBlockKind::Indented => None,
-                };
+                let language = extract_language(kind);
                 pos += 1;
-                let mut code = String::new();
-                while let Some(e) = get_event(&events, pos) {
-                    match e {
-                        Event::Text(t) => code.push_str(t),
-                        Event::End(TagEnd::CodeBlock) => break,
-                        _ => {}
-                    }
-                    pos += 1;
-                }
+                let code = extract_code_content(&events, &mut pos);
                 doc.nodes.push(DocNode::CodeBlock { language, code });
                 doc.nodes.push(DocNode::Blank);
             }
@@ -218,6 +191,47 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
 
 fn get_event<'a>(events: &'a [Event<'a>], pos: usize) -> Option<&'a Event<'a>> {
     events.get(pos)
+}
+
+fn extract_heading_text(events: &[Event], pos: &mut usize) -> String {
+    let mut text = String::new();
+    while let Some(e) = get_event(events, *pos) {
+        match e {
+            Event::Text(t) => text.push_str(t),
+            Event::Code(t) => text.push_str(t),
+            Event::End(TagEnd::Heading(_)) => break,
+            _ => {}
+        }
+        *pos += 1;
+    }
+    text
+}
+
+fn extract_code_content(events: &[Event], pos: &mut usize) -> String {
+    let mut code = String::new();
+    while let Some(e) = get_event(events, *pos) {
+        match e {
+            Event::Text(t) => code.push_str(t),
+            Event::End(TagEnd::CodeBlock) => break,
+            _ => {}
+        }
+        *pos += 1;
+    }
+    code
+}
+
+fn extract_language(kind: &pulldown_cmark::CodeBlockKind) -> Option<String> {
+    match kind {
+        pulldown_cmark::CodeBlockKind::Fenced(lang) => {
+            let s = lang.to_string();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        pulldown_cmark::CodeBlockKind::Indented => None,
+    }
 }
 
 fn collect_inline_spans(
@@ -316,16 +330,7 @@ fn collect_blockquote(events: &[Event], pos: &mut usize, children: &mut Vec<DocN
             Event::End(TagEnd::BlockQuote(_)) => break,
             Event::Start(Tag::Heading { level, .. }) => {
                 *pos += 1;
-                let mut text = String::new();
-                while let Some(e) = get_event(events, *pos) {
-                    match e {
-                        Event::Text(t) => text.push_str(t),
-                        Event::Code(t) => text.push_str(t),
-                        Event::End(TagEnd::Heading(_)) => break,
-                        _ => {}
-                    }
-                    *pos += 1;
-                }
+                let text = extract_heading_text(events, pos);
                 children.push(DocNode::Heading {
                     level: heading_level_to_u8(*level),
                     text,
@@ -352,27 +357,9 @@ fn collect_blockquote(events: &[Event], pos: &mut usize, children: &mut Vec<DocN
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                let language = match kind {
-                    pulldown_cmark::CodeBlockKind::Fenced(lang) => {
-                        let s = lang.to_string();
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s)
-                        }
-                    }
-                    pulldown_cmark::CodeBlockKind::Indented => None,
-                };
+                let language = extract_language(kind);
                 *pos += 1;
-                let mut code = String::new();
-                while let Some(e) = get_event(events, *pos) {
-                    match e {
-                        Event::Text(t) => code.push_str(t),
-                        Event::End(TagEnd::CodeBlock) => break,
-                        _ => {}
-                    }
-                    *pos += 1;
-                }
+                let code = extract_code_content(events, pos);
                 children.push(DocNode::CodeBlock { language, code });
                 children.push(DocNode::Blank);
             }

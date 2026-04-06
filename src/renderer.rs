@@ -25,6 +25,44 @@ static HL_CACHE: OnceLock<
 > = OnceLock::new();
 pub const IMAGE_RENDER_HEIGHT: usize = 10;
 
+const CODE_BLOCK_LEFT_BORDER: &str = "│ ";
+const CODE_BLOCK_RIGHT_BORDER: &str = "│";
+const CODE_BLOCK_TOP_LEFT: &str = "╭─ ";
+const CODE_BLOCK_TOP_RIGHT: &str = "╮";
+const CODE_BLOCK_BOTTOM_LEFT: &str = "╰─";
+const CODE_BLOCK_BOTTOM_RIGHT: &str = "┘";
+const CODE_BLOCK_SPACE_BEFORE_DASHES: usize = 1;
+
+const BLOCKQUOTE_LEFT_BORDER: &str = "│ ";
+const BLOCKQUOTE_RIGHT_BORDER: &str = "│";
+const BLOCKQUOTE_TOP_LEFT: &str = "╭─";
+const BLOCKQUOTE_TOP_RIGHT: &str = "─╮";
+const BLOCKQUOTE_BOTTOM_LEFT: &str = "╰─";
+const BLOCKQUOTE_BOTTOM_RIGHT: &str = "─╯";
+const BLOCKQUOTE_HORIZONTAL: &str = "─";
+
+const RULE_CHAR: &str = "─";
+
+const TABLE_VERTICAL_BORDER: &str = "│";
+const TABLE_TOP_LEFT: &str = "╭";
+const TABLE_TOP_MID: &str = "┬";
+const TABLE_TOP_RIGHT: &str = "╮";
+const TABLE_MID_LEFT: &str = "├";
+const TABLE_MID_MID: &str = "┼";
+const TABLE_MID_RIGHT: &str = "┤";
+const TABLE_BOTTOM_LEFT: &str = "╰";
+const TABLE_BOTTOM_MID: &str = "┴";
+const TABLE_BOTTOM_RIGHT: &str = "╯";
+const TABLE_CELL_PADDING: usize = 1;
+const TABLE_CELL_PADDING_TOTAL: usize = TABLE_CELL_PADDING * 2;
+const TABLE_MIN_COL_WIDTH: usize = 3;
+
+const LIST_INDENT_PER_DEPTH: usize = 2;
+const LIST_BULLETS: [&str; 4] = ["•", "◦", "▸", "▹"];
+const LIST_MIN_AVAILABLE_WIDTH: usize = 10;
+
+const INLINE_CODE_PADDING: usize = 1;
+
 #[derive(Debug)]
 pub struct RenderResult {
     pub lines: Vec<Line<'static>>,
@@ -46,13 +84,14 @@ fn get_hl_cache(
 }
 
 /// Render a list of DocNodes into a flat list of ratatui Lines.
-/// `width` is the content column width for wrapping / rule drawing.
-/// Returns (lines, image_positions): image_positions maps line-index → (src, alt).
-pub fn render_nodes(nodes: &[DocNode], width: u16) -> RenderResult {
+/// `width` is the content column width for text wrapping.
+/// `full_width` is the full content area width including margins, used for Rule.
+pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderResult {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut image_positions: Vec<(usize, String, String)> = Vec::new();
     let mut node_line_starts: Vec<usize> = Vec::with_capacity(nodes.len());
     let w = width as usize;
+    let full_w = full_width as usize;
 
     for node in nodes {
         node_line_starts.push(lines.len());
@@ -78,14 +117,53 @@ pub fn render_nodes(nodes: &[DocNode], width: u16) -> RenderResult {
             }
 
             DocNode::BlockQuote(children) => {
-                let inner_width = width.saturating_sub(2).max(1);
-                let nested = render_nodes(children, inner_width);
+                let left_border_width = display_width(BLOCKQUOTE_LEFT_BORDER);
+                let right_border_width = display_width(BLOCKQUOTE_RIGHT_BORDER);
+                let inner_width = (w as u16)
+                    .saturating_sub((left_border_width + right_border_width) as u16)
+                    .max(1);
+                let nested: RenderResult = render_nodes(children, inner_width, inner_width);
                 let start_idx = lines.len();
 
-                for line in nested.lines {
-                    let mut quoted_spans = vec![Span::styled("│ ", Theme::blockquote_bar())];
-                    quoted_spans.extend(line.spans);
+                let border_style = Theme::blockquote_bar();
+
+                if !nested.lines.is_empty() {
+                    let top_bar_width = w.saturating_sub(
+                        display_width(BLOCKQUOTE_TOP_LEFT) + display_width(BLOCKQUOTE_TOP_RIGHT),
+                    );
+                    let top_bar = BLOCKQUOTE_HORIZONTAL.repeat(top_bar_width);
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("{}{}{}", BLOCKQUOTE_TOP_LEFT, top_bar, BLOCKQUOTE_TOP_RIGHT),
+                        border_style,
+                    )]));
+                }
+
+                for line in &nested.lines {
+                    let content_width: usize =
+                        line.spans.iter().map(|s| display_width(&s.content)).sum();
+                    let padding = (inner_width as usize).saturating_sub(content_width);
+                    let mut quoted_spans = vec![Span::styled(BLOCKQUOTE_LEFT_BORDER, border_style)];
+                    quoted_spans.extend(line.spans.clone());
+                    if padding > 0 {
+                        quoted_spans.push(Span::styled(" ".repeat(padding), Style::default()));
+                    }
+                    quoted_spans.push(Span::styled(BLOCKQUOTE_RIGHT_BORDER, border_style));
                     lines.push(Line::from(quoted_spans));
+                }
+
+                if !nested.lines.is_empty() {
+                    let bot_bar_width = w.saturating_sub(
+                        display_width(BLOCKQUOTE_BOTTOM_LEFT)
+                            + display_width(BLOCKQUOTE_BOTTOM_RIGHT),
+                    );
+                    let bot_bar = BLOCKQUOTE_HORIZONTAL.repeat(bot_bar_width);
+                    lines.push(Line::from(vec![Span::styled(
+                        format!(
+                            "{}{}{}",
+                            BLOCKQUOTE_BOTTOM_LEFT, bot_bar, BLOCKQUOTE_BOTTOM_RIGHT
+                        ),
+                        border_style,
+                    )]));
                 }
 
                 image_positions.extend(
@@ -102,17 +180,16 @@ pub fn render_nodes(nodes: &[DocNode], width: u16) -> RenderResult {
                 number,
                 children,
             } => {
-                let indent = "  ".repeat(*depth);
+                let indent = " ".repeat(LIST_INDENT_PER_DEPTH * depth);
                 let bullet = if *ordered {
                     format!("{}{}. ", indent, number.unwrap_or(1))
                 } else {
-                    let bullets = ["•", "◦", "▸", "▹"];
-                    format!("{}{} ", indent, bullets[depth % bullets.len()])
+                    format!("{}{} ", indent, LIST_BULLETS[depth % LIST_BULLETS.len()])
                 };
                 let bullet_style = Theme::bullet(*depth);
                 let bullet_width = display_width(&bullet);
                 let continuation_indent = " ".repeat(bullet_width);
-                let avail = w.saturating_sub(bullet_width).max(10);
+                let avail = w.saturating_sub(bullet_width).max(LIST_MIN_AVAILABLE_WIDTH);
 
                 let rendered = render_inline_spans(children);
                 let wrapped = soft_wrap_spans(rendered, avail);
@@ -132,7 +209,7 @@ pub fn render_nodes(nodes: &[DocNode], width: u16) -> RenderResult {
             }
 
             DocNode::Rule => {
-                let rule = "─".repeat(w.saturating_sub(2));
+                let rule = RULE_CHAR.repeat(full_w);
                 lines.push(Line::from(Span::styled(rule, Theme::rule())));
             }
 
@@ -185,9 +262,15 @@ fn render_inline_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
             InlineSpan::Bold(t) => result.push(Span::styled(t.clone(), Theme::bold())),
             InlineSpan::Italic(t) => result.push(Span::styled(t.clone(), Theme::italic())),
             InlineSpan::BoldItalic(t) => result.push(Span::styled(t.clone(), Theme::bold_italic())),
-            InlineSpan::Code(t) => {
-                result.push(Span::styled(format!(" {} ", t), Theme::inline_code()))
-            }
+            InlineSpan::Code(t) => result.push(Span::styled(
+                format!(
+                    "{}{}{}",
+                    " ".repeat(INLINE_CODE_PADDING),
+                    t,
+                    " ".repeat(INLINE_CODE_PADDING)
+                ),
+                Theme::inline_code(),
+            )),
             InlineSpan::Strikethrough(t) => {
                 result.push(Span::styled(t.clone(), Theme::strikethrough()))
             }
@@ -276,13 +359,19 @@ fn render_code_block(
 ) {
     let border_style = Theme::code_block_border();
     let lang_label = language.unwrap_or("text");
+    let lang_label_width = display_width(lang_label);
 
-    // Top border
-    let top_right = "─".repeat(width.saturating_sub(display_width(lang_label) + 5));
+    let top_border_width = display_width(CODE_BLOCK_TOP_LEFT)
+        + lang_label_width
+        + CODE_BLOCK_SPACE_BEFORE_DASHES
+        + display_width(CODE_BLOCK_TOP_RIGHT);
+    let top_right_len = width.saturating_sub(top_border_width);
+    let top_right = "─".repeat(top_right_len);
+    let top_right_with_space = format!(" {}{}", top_right, CODE_BLOCK_TOP_RIGHT);
     lines.push(Line::from(vec![
-        Span::styled("╭─ ", border_style),
+        Span::styled(CODE_BLOCK_TOP_LEFT, border_style),
         Span::styled(lang_label.to_string(), Theme::code_block_lang()),
-        Span::styled(format!(" {}", top_right), border_style),
+        Span::styled(top_right_with_space, border_style),
     ]));
 
     let cache_key = (lang_label.to_string(), code.to_string());
@@ -323,7 +412,10 @@ fn render_code_block(
         all_regions
     };
 
-    let mut current_line_spans: Vec<Span<'static>> = vec![Span::styled("│ ", border_style)];
+    let mut current_line_spans: Vec<Span<'static>> =
+        vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
+    let mut current_line_content_width: usize = display_width(CODE_BLOCK_LEFT_BORDER);
+    let right_border_width = display_width(CODE_BLOCK_RIGHT_BORDER);
     for (style, text) in regions_to_render {
         if text.ends_with('\n') {
             if !text.is_empty() {
@@ -344,10 +436,17 @@ fn render_code_block(
                         s = s.add_modifier(Modifier::ITALIC);
                     }
                     current_line_spans.push(Span::styled(trimmed.to_string(), s));
+                    current_line_content_width += display_width(trimmed);
                 }
             }
+            let padding = width.saturating_sub(current_line_content_width + right_border_width);
+            if padding > 0 {
+                current_line_spans.push(Span::styled(" ".repeat(padding), Style::default()));
+            }
+            current_line_spans.push(Span::styled(CODE_BLOCK_RIGHT_BORDER, border_style));
             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-            current_line_spans = vec![Span::styled("│ ", border_style)];
+            current_line_spans = vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
+            current_line_content_width = display_width(CODE_BLOCK_LEFT_BORDER);
         } else {
             if text.is_empty() {
                 continue;
@@ -366,17 +465,28 @@ fn render_code_block(
             if italic {
                 s = s.add_modifier(Modifier::ITALIC);
             }
+            let text_width = display_width(&text);
             current_line_spans.push(Span::styled(text, s));
+            current_line_content_width += text_width;
         }
     }
     if current_line_spans.len() > 1 {
+        let padding = width.saturating_sub(current_line_content_width + right_border_width);
+        if padding > 0 {
+            current_line_spans.push(Span::styled(" ".repeat(padding), Style::default()));
+        }
+        current_line_spans.push(Span::styled(CODE_BLOCK_RIGHT_BORDER, border_style));
         lines.push(Line::from(current_line_spans));
     }
 
-    // Bottom border
-    let bot = "─".repeat(width.saturating_sub(2));
+    let bot = "─".repeat(width.saturating_sub(
+        display_width(CODE_BLOCK_BOTTOM_LEFT) + display_width(CODE_BLOCK_BOTTOM_RIGHT),
+    ));
     lines.push(Line::from(vec![Span::styled(
-        format!("╰{}", bot),
+        format!(
+            "{}{}{}",
+            CODE_BLOCK_BOTTOM_LEFT, bot, CODE_BLOCK_BOTTOM_RIGHT
+        ),
         border_style,
     )]));
 }
@@ -408,15 +518,20 @@ fn render_table(
     lines.push(table_top_border(&col_widths, border));
 
     // Header row
-    let mut header_spans = vec![Span::styled("│", border)];
+    let mut header_spans = vec![Span::styled(TABLE_VERTICAL_BORDER, border)];
     for (i, h) in headers.iter().enumerate() {
         let w = col_widths[i];
-        let trunc = truncate_text(h, w);
+        let content = truncate_text(h, w);
+        let content_width = display_width(&content);
         header_spans.push(Span::styled(
-            format!(" {:<width$} ", trunc, width = w),
+            format!("{}{}", " ".repeat(TABLE_CELL_PADDING), content),
             h_style,
         ));
-        header_spans.push(Span::styled("│", border));
+        let remaining = w.saturating_sub(content_width) + TABLE_CELL_PADDING;
+        header_spans.push(Span::styled(
+            format!("{}{}", " ".repeat(remaining), TABLE_VERTICAL_BORDER),
+            border,
+        ));
     }
     lines.push(Line::from(header_spans));
 
@@ -430,20 +545,26 @@ fn render_table(
         } else {
             Theme::table_row_odd()
         };
-        let mut row_spans = vec![Span::styled("│", border)];
+        let mut row_spans = vec![Span::styled(TABLE_VERTICAL_BORDER, border)];
         for (i, cell) in row.iter().enumerate() {
-            let w = col_widths.get(i).copied().unwrap_or(10);
-            let trunc = truncate_text(cell, w);
+            let w = col_widths.get(i).copied().unwrap_or(TABLE_MIN_COL_WIDTH);
+            let content = truncate_text(cell, w);
+            let content_width = display_width(&content);
             row_spans.push(Span::styled(
-                format!(" {:<width$} ", trunc, width = w),
+                format!("{}{}", " ".repeat(TABLE_CELL_PADDING), content),
                 row_style,
             ));
-            row_spans.push(Span::styled("│", border));
+            let remaining = w.saturating_sub(content_width) + TABLE_CELL_PADDING;
+            row_spans.push(Span::styled(
+                format!("{}{}", " ".repeat(remaining), TABLE_VERTICAL_BORDER),
+                border,
+            ));
         }
         // pad missing cells
-        for w in col_widths.iter().take(ncols).skip(row.len()) {
-            row_spans.push(Span::styled(" ".repeat(w + 2), row_style));
-            row_spans.push(Span::styled("│", border));
+        for &w in col_widths.iter().take(ncols).skip(row.len()) {
+            let empty_cell = " ".repeat(TABLE_CELL_PADDING + w);
+            row_spans.push(Span::styled(empty_cell, row_style));
+            row_spans.push(Span::styled(TABLE_VERTICAL_BORDER, border));
         }
         lines.push(Line::from(row_spans));
     }
@@ -458,46 +579,61 @@ fn compute_col_widths(
     max_width: usize,
     ncols: usize,
 ) -> Vec<usize> {
-    let mut widths: Vec<usize> = headers.iter().map(|h| display_width(h).max(3)).collect();
+    let vert_border_w = display_width(TABLE_VERTICAL_BORDER);
+    let overhead = (ncols + 1) * vert_border_w + ncols * TABLE_CELL_PADDING_TOTAL;
+
+    let mut natural_widths: Vec<usize> = headers
+        .iter()
+        .map(|h| display_width(h).max(TABLE_MIN_COL_WIDTH))
+        .collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            if i < widths.len() {
-                widths[i] = widths[i].max(display_width(cell));
+            if i < natural_widths.len() {
+                natural_widths[i] = natural_widths[i].max(display_width(cell));
             }
         }
     }
-    // Cap so total fits within max_width
-    // borders: ncols+1 `│` + 2 spaces per col
-    let overhead = ncols + 1 + ncols * 2;
+
     let avail = max_width.saturating_sub(overhead);
-    let total: usize = widths.iter().sum();
-    if total > avail && avail > 0 {
-        // Give each column a fair minimum based on its content, then distribute
-        // remaining space proportionally among columns that can shrink more.
-        let min_per_col = 4;
-        let guaranteed = ncols * min_per_col;
-        if avail < guaranteed {
-            // Not enough space for minimums — distribute equally
-            let equal = (avail / ncols).max(3);
-            widths = vec![equal; ncols];
-        } else {
-            let remaining = avail - guaranteed;
-            let shrinkable: usize = widths.iter().map(|&w| w.saturating_sub(min_per_col)).sum();
-            if shrinkable == 0 {
-                widths = vec![min_per_col; ncols];
-            } else {
-                let scale = remaining as f64 / shrinkable as f64;
-                widths = widths
-                    .iter()
-                    .map(|&w| {
-                        let extra =
-                            ((w.saturating_sub(min_per_col)) as f64 * scale).floor() as usize;
-                        (min_per_col + extra).max(3)
-                    })
-                    .collect();
-            }
+    let total_natural: usize = natural_widths.iter().sum();
+
+    if total_natural <= avail {
+        return natural_widths;
+    }
+
+    if avail < ncols * TABLE_MIN_COL_WIDTH {
+        let equal = (avail / ncols).max(TABLE_MIN_COL_WIDTH);
+        return vec![equal; ncols];
+    }
+
+    let mut widths = natural_widths.clone();
+    let total_excess: usize = widths
+        .iter()
+        .map(|&w| w.saturating_sub(TABLE_MIN_COL_WIDTH))
+        .sum();
+
+    if total_excess == 0 {
+        return widths;
+    }
+
+    let shrinkage_needed = total_natural.saturating_sub(avail);
+    let scale = (shrinkage_needed as f64 / total_excess as f64).min(1.0);
+
+    for w in widths.iter_mut() {
+        let excess = w.saturating_sub(TABLE_MIN_COL_WIDTH);
+        let shrink = (excess as f64 * scale).floor() as usize;
+        *w = (*w - shrink).max(TABLE_MIN_COL_WIDTH);
+    }
+
+    let total_after: usize = widths.iter().sum();
+    if total_after > avail {
+        let remaining = avail - total_after;
+        for i in 0..remaining {
+            let idx = i as usize % ncols;
+            widths[idx] = (widths[idx] - 1).max(TABLE_MIN_COL_WIDTH);
         }
     }
+
     widths
 }
 
@@ -597,7 +733,7 @@ fn build_table_border(
 ) -> Line<'static> {
     let mut s = String::from(corners.0);
     for (i, &w) in col_widths.iter().enumerate() {
-        s.push_str(&"─".repeat(w + 2));
+        s.push_str(&"─".repeat(w + TABLE_CELL_PADDING_TOTAL));
         if i < col_widths.len() - 1 {
             s.push_str(corners.1);
         } else {
@@ -608,15 +744,27 @@ fn build_table_border(
 }
 
 fn table_top_border(col_widths: &[usize], style: Style) -> Line<'static> {
-    build_table_border(col_widths, ("╭", "┬", "╮"), style)
+    build_table_border(
+        col_widths,
+        (TABLE_TOP_LEFT, TABLE_TOP_MID, TABLE_TOP_RIGHT),
+        style,
+    )
 }
 
 fn table_separator(col_widths: &[usize], style: Style) -> Line<'static> {
-    build_table_border(col_widths, ("├", "┼", "┤"), style)
+    build_table_border(
+        col_widths,
+        (TABLE_MID_LEFT, TABLE_MID_MID, TABLE_MID_RIGHT),
+        style,
+    )
 }
 
 fn table_bottom_border(col_widths: &[usize], style: Style) -> Line<'static> {
-    build_table_border(col_widths, ("╰", "┴", "╯"), style)
+    build_table_border(
+        col_widths,
+        (TABLE_BOTTOM_LEFT, TABLE_BOTTOM_MID, TABLE_BOTTOM_RIGHT),
+        style,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -725,6 +873,7 @@ mod tests {
                 alt: "alt".to_string(),
             }],
             80,
+            80,
         );
 
         assert_eq!(rendered.image_positions[0].0, 0);
@@ -747,6 +896,7 @@ mod tests {
                 },
             ],
             40,
+            40,
         );
 
         assert_eq!(rendered.node_line_starts, vec![0, 1, 2]);
@@ -768,9 +918,10 @@ mod tests {
                 },
             ])],
             40,
+            40,
         );
 
-        assert!(rendered.lines[0]
+        assert!(rendered.lines[1]
             .spans
             .iter()
             .any(|span| span.content.contains("Quoted")));
@@ -785,6 +936,7 @@ mod tests {
                 "你好世界".to_string(),
             )])],
             4,
+            4,
         );
 
         assert!(rendered.lines.len() >= 2);
@@ -797,5 +949,139 @@ mod tests {
         assert!(truncated.is_char_boundary(truncated.len()));
         assert_eq!(unicode_width::UnicodeWidthStr::width(truncated.as_str()), 3);
         assert_eq!(truncated, "你…");
+    }
+
+    #[test]
+    fn blockquote_box_widths_match() {
+        config::load().unwrap();
+        let width: u16 = 40;
+        let rendered = render_nodes(
+            &[DocNode::BlockQuote(vec![DocNode::Paragraph(vec![
+                crate::parser::InlineSpan::Text("Hello world".to_string()),
+            ])])],
+            width,
+            width,
+        );
+
+        assert_eq!(rendered.lines.len(), 3);
+        for (i, line) in rendered.lines.iter().enumerate() {
+            let w: usize = line
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            assert_eq!(w, width as usize, "line {i} width mismatch");
+        }
+        assert!(rendered.lines[0].spans[0].content.starts_with("╭"));
+        assert!(rendered.lines[0].spans[0].content.ends_with("╮"));
+        assert!(rendered.lines[2].spans[0].content.starts_with("╰"));
+        assert!(rendered.lines[2].spans[0].content.ends_with("╯"));
+    }
+
+    #[test]
+    fn blockquote_renders_in_buffer() {
+        use ratatui::{
+            buffer::Buffer,
+            layout::Rect,
+            text::Text,
+            widgets::{Paragraph, Widget, Wrap},
+        };
+
+        config::load().unwrap();
+        let width: u16 = 40;
+        let height: u16 = 5;
+        let rendered = render_nodes(
+            &[DocNode::BlockQuote(vec![DocNode::Paragraph(vec![
+                crate::parser::InlineSpan::Text("Hello world".to_string()),
+            ])])],
+            width,
+            width,
+        );
+
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        let paragraph =
+            Paragraph::new(Text::from(rendered.lines.clone())).wrap(Wrap { trim: false });
+        paragraph.render(area, &mut buf);
+
+        for y in 0..height {
+            let mut row = String::new();
+            let mut x = 0u16;
+            while x < width {
+                let cell = &buf[(x, y)];
+                let sym = cell.symbol();
+                row.push_str(sym);
+                let sw = unicode_width::UnicodeWidthStr::width(sym) as u16;
+                x += if sw > 0 { sw } else { 1 };
+            }
+            eprintln!("row {y}: |{row}|");
+        }
+
+        assert_eq!(buf[(0, 0)].symbol(), "╭");
+        assert_eq!(buf[(width - 1, 0)].symbol(), "╮");
+        assert_eq!(buf[(width - 1, 1)].symbol(), "│");
+        assert_eq!(buf[(width - 1, 2)].symbol(), "╯");
+    }
+
+    #[test]
+    fn table_borders_align_with_columns() {
+        use unicode_width::UnicodeWidthStr;
+
+        config::load().unwrap();
+
+        let width: u16 = 100;
+
+        let headers = vec![
+            "作品名称".to_string(),
+            "在线地址".to_string(),
+            "上线日期".to_string(),
+        ];
+        let rows = vec![vec![
+            "逍遥自在轩".to_string(),
+            "https://niceshare.site".to_string(),
+            "2024-04-26".to_string(),
+        ]];
+
+        let rendered = render_nodes(&[DocNode::Table { headers, rows }], width, width);
+
+        for (i, line) in rendered.lines.iter().enumerate() {
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            eprintln!(
+                "line {i} total_width={line_width} spans={:?}",
+                line.spans
+                    .iter()
+                    .map(|s| (
+                        UnicodeWidthStr::width(s.content.as_ref()),
+                        s.content.as_ref().to_string()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        // Verify header and data row widths match borders
+        let header_row = &rendered.lines[1];
+        let top_border = &rendered.lines[0];
+        let header_total: usize = header_row
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let border_total: usize = top_border
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        eprintln!(
+            "header_total={}, border_total={}",
+            header_total, border_total
+        );
+        assert_eq!(
+            header_total, border_total,
+            "Header row width should match top border width"
+        );
     }
 }

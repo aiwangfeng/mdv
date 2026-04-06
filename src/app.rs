@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::config;
 use crate::parser::Document;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,7 @@ pub struct App {
     pub scroll: usize,
     pub content_height: u16,
     pub content_width: u16,
+    pub full_content_width: u16,
 
     pub toc_cursor: usize,
     pub toc_scroll: usize,
@@ -95,6 +97,7 @@ impl App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "mdv".to_string());
 
+        let cfg = config::get();
         Self {
             file_path,
             file_name,
@@ -103,12 +106,13 @@ impl App {
             rendered_texts_lower: HashMap::new(),
             image_positions,
             toc_line_indices,
-            toc_width_pct: 25,
+            toc_width_pct: cfg.toc_width_pct,
             show_toc: true,
             focus: Focus::Content,
             scroll: 0,
             content_height: 0,
             content_width: 0,
+            full_content_width: 0,
             toc_cursor: 0,
             toc_scroll: 0,
             toc_height: 0,
@@ -140,8 +144,22 @@ impl App {
         s
     }
 
-    pub fn line_lower_ref(&self, idx: usize) -> Option<String> {
-        self.rendered_texts_lower.get(&idx).cloned()
+    pub fn line_lower_ref(&mut self, idx: usize) -> Option<String> {
+        if self.rendered_texts_lower.contains_key(&idx) {
+            return self.rendered_texts_lower.get(&idx).cloned();
+        }
+        if idx < self.rendered_lines.len() {
+            let s = self.rendered_lines[idx]
+                .spans
+                .iter()
+                .map(|sp| sp.content.as_ref())
+                .collect::<String>()
+                .to_lowercase();
+            self.rendered_texts_lower.insert(idx, s.clone());
+            Some(s)
+        } else {
+            None
+        }
     }
 
     // ---------------------------------------------------------------------------

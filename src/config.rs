@@ -64,12 +64,36 @@ where
     })
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub theme: ThemeConfig,
     pub keys: KeybindingsConfig,
     #[serde(default)]
     pub theme_name: String,
+    #[serde(default = "default_toc_width_pct")]
+    pub toc_width_pct: u16,
+    #[serde(default = "default_content_margin")]
+    pub content_margin: u16,
+}
+
+fn default_toc_width_pct() -> u16 {
+    20
+}
+
+fn default_content_margin() -> u16 {
+    4
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: ThemeConfig::default(),
+            keys: KeybindingsConfig::default(),
+            theme_name: String::new(),
+            toc_width_pct: 20,
+            content_margin: 4,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -267,7 +291,7 @@ pub fn get() -> &'static Config {
     if CONFIG.get().is_none() {
         let _ = load();
     }
-    CONFIG.get().expect("config should be loaded")
+    CONFIG.get_or_init(|| Config::default())
 }
 
 pub fn keymap() -> &'static ResolvedKeybindings {

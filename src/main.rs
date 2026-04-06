@@ -50,6 +50,8 @@ enum AppEvent {
 // ---------------------------------------------------------------------------
 
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB limit
+const POLL_INTERVAL_MS: u64 = 16;
+const RESIZE_DEBOUNCE_MS: u64 = 50;
 
 #[derive(ClapParser, Debug)]
 #[command(
@@ -109,7 +111,7 @@ fn main() -> Result<()> {
         lines: rendered_lines,
         image_positions,
         node_line_starts,
-    } = renderer::render_nodes(&document.nodes, initial_width);
+    } = renderer::render_nodes(&document.nodes, initial_width, initial_width);
     let toc_line_indices = document
         .toc
         .iter()
@@ -174,76 +176,51 @@ fn run(
     img_mgr: &mut ImageManager,
     rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
-    let mut current_width = terminal.size()?.width;
-    let mut last_width = 0u16;
+    let mut last_render_width = 0u16;
     let mut needs_redraw = true;
-    let mut pending_resize: Option<u16> = None;
+    let mut pending_resize: Option<(u16, u16)> = None;
     let mut resize_deadline: Option<Instant> = None;
-    let mut initial_render_done = false;
-    const RESIZE_DEBOUNCE_MS: u64 = 50;
 
     loop {
-        if let (Some(w), Some(deadline)) = (pending_resize, resize_deadline) {
+        if let (Some(_), Some(deadline)) = (pending_resize, resize_deadline) {
             if Instant::now() >= deadline {
                 pending_resize = None;
                 resize_deadline = None;
-                current_width = w;
-                initial_render_done = true;
-
-                let content_width = if app.show_toc && app.toc_len() > 0 {
-                    let toc_cols = current_width * app.toc_width_pct / 100;
-                    current_width.saturating_sub(toc_cols).saturating_sub(2)
-                } else {
-                    current_width.saturating_sub(2)
-                };
-
-                if content_width != last_width && content_width > 0 {
-                    let RenderResult {
-                        lines,
-                        image_positions: img_pos,
-                        node_line_starts,
-                    } = renderer::render_nodes(&app.document.nodes, content_width);
-                    app.update_render(lines, img_pos, &node_line_starts);
-
-                    last_width = content_width;
-                    needs_redraw = true;
-                }
-            }
-        }
-
-        if !initial_render_done && current_width > 0 {
-            let content_width = if app.show_toc && app.toc_len() > 0 {
-                let toc_cols = current_width * app.toc_width_pct / 100;
-                current_width.saturating_sub(toc_cols).saturating_sub(2)
-            } else {
-                current_width.saturating_sub(2)
-            };
-
-            if content_width != last_width && content_width > 0 {
-                let RenderResult {
-                    lines,
-                    image_positions: img_pos,
-                    node_line_starts,
-                } = renderer::render_nodes(&app.document.nodes, content_width);
-                app.update_render(lines, img_pos, &node_line_starts);
-
-                if img_mgr.is_enabled() {
-                    let base_dir = get_base_dir(&app.file_path);
-                    for (_, src, _) in &app.image_positions {
-                        img_mgr.load_async(src, base_dir);
-                    }
-                }
-                last_width = content_width;
                 needs_redraw = true;
             }
-            initial_render_done = true;
         }
 
+        // Always draw first so ui.rs computes the authoritative content_width.
         if needs_redraw {
             terminal.draw(|frame| {
                 ui::draw(frame, app, img_mgr);
             })?;
             needs_redraw = false;
+        }
+
+        // After draw, ui.rs has set app.content_width and app.full_content_width.
+        // Re-render markdown if the width changed.
+        let cw = app.content_width;
+        let fw = app.full_content_width;
+        if cw != last_render_width && cw > 0 {
+            let RenderResult {
+                lines,
+                image_positions: img_pos,
+                node_line_starts,
+            } = renderer::render_nodes(&app.document.nodes, cw, fw);
+            app.update_render(lines, img_pos, &node_line_starts);
+
+            if img_mgr.is_enabled() {
+                let base_dir = get_base_dir(&app.file_path);
+                for (_, src, _) in &app.image_positions {
+                    img_mgr.load_async(src, base_dir);
+                }
+            }
+            last_render_width = cw;
+            // Draw again with the correctly-sized rendered lines.
+            terminal.draw(|frame| {
+                ui::draw(frame, app, img_mgr);
+            })?;
         }
 
         app.tick_toast();
@@ -252,10 +229,10 @@ fn run(
             needs_redraw = true;
         }
 
-        match rx.recv_timeout(Duration::from_millis(16)) {
+        match rx.recv_timeout(Duration::from_millis(POLL_INTERVAL_MS)) {
             Ok(event) => {
-                if let AppEvent::Resize(w, _h) = event {
-                    pending_resize = Some(w);
+                if let AppEvent::Resize(w, h) = event {
+                    pending_resize = Some((w, h));
                     resize_deadline =
                         Some(Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
                 }
@@ -266,8 +243,8 @@ fn run(
         }
 
         while let Ok(message) = rx.try_recv() {
-            if let AppEvent::Resize(w, _h) = message {
-                pending_resize = Some(w);
+            if let AppEvent::Resize(w, h) = message {
+                pending_resize = Some((w, h));
                 resize_deadline = Some(Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
             }
             needs_redraw |= handle_app_event(app, message);
@@ -282,7 +259,7 @@ fn run(
 fn spawn_input_thread(tx: mpsc::Sender<AppEvent>, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
-            match event::poll(Duration::from_millis(16)) {
+            match event::poll(Duration::from_millis(POLL_INTERVAL_MS)) {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(key))
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>

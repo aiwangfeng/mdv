@@ -1,8 +1,6 @@
 // src/ui.rs
 // Draws the full TUI: layout, TOC panel, content panel, status bar, overlays.
 
-pub const CONTENT_MARGIN: u16 = 4;
-
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     text::{Line, Span, Text},
@@ -22,8 +20,13 @@ use crate::renderer::{apply_search_highlight, IMAGE_RENDER_HEIGHT};
 use crate::theme::Theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+fn get_content_margin() -> u16 {
+    config::get().content_margin
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
     let area = frame.area();
+    let content_margin = get_content_margin();
 
     // ── Overall vertical split: content area + status bar ──────────────────
     let [main_area, status_area] =
@@ -31,7 +34,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
 
     // ── Horizontal split: TOC (optional) | Content ─────────────────────────
     let (toc_area, content_area) = if app.show_toc && app.toc_len() > 0 {
-        let toc_pct = app.toc_width_pct;
+        let toc_pct = app.toc_width_pct.min(50);
         let [l, r] = Layout::horizontal([
             Constraint::Percentage(toc_pct),
             Constraint::Percentage(100 - toc_pct),
@@ -46,9 +49,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
     let inner_content_width = content_area
         .width
         .saturating_sub(2)
-        .saturating_sub(CONTENT_MARGIN);
+        .saturating_sub(content_margin);
     app.content_height = inner_content_height;
     app.content_width = inner_content_width;
+    app.full_content_width = inner_content_width;
     if let Some(ta) = toc_area {
         app.toc_height = ta.height.saturating_sub(2);
     }
@@ -171,7 +175,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
     frame.render_widget(block, area);
 
     let [inner_with_margin] = Layout::horizontal([Constraint::Min(0)])
-        .horizontal_margin(CONTENT_MARGIN / 2)
+        .horizontal_margin(get_content_margin() / 2)
         .areas(inner);
 
     let scroll = app.scroll;

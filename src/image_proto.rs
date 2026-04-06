@@ -74,11 +74,13 @@ impl ImageManager {
         if src.starts_with('/') {
             let abs = PathBuf::from(src);
             let canonical = abs.canonicalize().ok()?;
-            let allowed_prefixes = [std::env::var("HOME").ok()?, std::env::var("PWD").ok()?];
-            let allowed = allowed_prefixes
-                .iter()
-                .filter_map(|p| Path::new(p).canonicalize().ok())
-                .any(|p| canonical.starts_with(p));
+            let home = dirs_home();
+            let pwd = std::env::var("PWD").ok().map(PathBuf::from);
+            let allowed_prefixes: Vec<PathBuf> = std::iter::once(home)
+                .chain(pwd)
+                .filter_map(|p| p.canonicalize().ok())
+                .collect();
+            let allowed = allowed_prefixes.iter().any(|p| canonical.starts_with(p));
             if !allowed {
                 log::warn!(
                     "Rejected absolute path outside allowed directories: {}",

@@ -1,3 +1,5 @@
 .opencode/
 target/
 .DS_Store
+
+mdv_test.md
