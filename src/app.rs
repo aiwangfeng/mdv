@@ -644,8 +644,6 @@ impl App {
         };
 
         let document = crate::parser::parse(&markdown);
-        let initial_width = 80u16;
-        let result = crate::renderer::render_nodes(&document.nodes, initial_width, initial_width);
 
         if let Some(cached) = self.file_cache.get(&file_index) {
             self.document = Arc::clone(&cached.document);
@@ -653,25 +651,19 @@ impl App {
             self.image_positions = cached.image_positions.clone();
             self.toc_line_indices = cached.toc_line_indices.clone();
         } else {
-            let toc_line_indices: Vec<usize> = result
-                .node_line_starts
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| document.toc.iter().any(|e| e.node_index == *i))
-                .map(|(_, &line)| line)
-                .collect();
+            let toc_line_indices: Vec<usize> = document.toc.iter().map(|e| e.node_index).collect();
             self.document = Arc::new(document);
-            self.rendered_lines = Arc::new(result.lines);
-            self.image_positions = result.image_positions;
-            self.toc_line_indices = toc_line_indices;
+            self.rendered_lines = Arc::new(vec![]);
+            self.image_positions = vec![];
+            self.toc_line_indices = toc_line_indices.clone();
 
             self.file_cache.insert(
                 file_index,
                 CachedDocument {
                     document: Arc::clone(&self.document),
-                    rendered_lines: Arc::clone(&self.rendered_lines),
-                    image_positions: self.image_positions.clone(),
-                    toc_line_indices: self.toc_line_indices.clone(),
+                    rendered_lines: Arc::new(vec![]),
+                    image_positions: vec![],
+                    toc_line_indices,
                 },
             );
         }

@@ -220,10 +220,11 @@ fn run(
         }
 
         // After draw, ui.rs has set app.content_width and app.full_content_width.
-        // Re-render markdown if the width changed.
+        // Re-render markdown if the width changed or if no rendered lines yet.
         let cw = app.content_width;
         let fw = app.full_content_width;
-        if cw != last_render_width && cw > 0 {
+        let needs_render = app.rendered_lines.is_empty() || cw != last_render_width;
+        if needs_render && cw > 0 {
             let RenderResult {
                 lines,
                 image_positions: img_pos,
