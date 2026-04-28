@@ -5,16 +5,17 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use directories::ProjectDirs;
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer};
+use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use crate::themes::{ThemeColors, ThemeName};
 
 thread_local! {
-    static THEME_CONFIG: Mutex<ThemeConfig> = Mutex::new(ThemeConfig::default());
+    static THEME_CONFIG: RefCell<ThemeConfig> = RefCell::new(ThemeConfig::default());
 }
 
 static CONFIG_LOADED: OnceLock<()> = OnceLock::new();
@@ -39,10 +40,9 @@ pub fn apply_theme_by_index(index: usize) {
 
     CURRENT_THEME_INDEX.store(normalized, Ordering::Relaxed);
     THEME_CONFIG.with(|tc| {
-        if let Ok(mut guard) = tc.lock() {
-            *guard = theme_config;
-        }
+        *tc.borrow_mut() = theme_config;
     });
+    crate::theme::refresh_cached_styles();
 }
 
 pub fn current_theme_index() -> usize {
@@ -58,10 +58,7 @@ pub fn get_theme<F, R>(f: F) -> R
 where
     F: FnOnce(&ThemeConfig) -> R,
 {
-    THEME_CONFIG.with(|tc| {
-        let guard = tc.lock().unwrap();
-        f(&guard)
-    })
+    THEME_CONFIG.with(|tc| f(&tc.borrow()))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -335,10 +332,9 @@ pub fn load() -> Result<()> {
                     let _ = CONFIG_LOADED.set(());
 
                     THEME_CONFIG.with(|tc| {
-                        if let Ok(mut guard) = tc.lock() {
-                            *guard = config.theme.clone();
-                        }
+                        *tc.borrow_mut() = config.theme.clone();
                     });
+                    crate::theme::refresh_cached_styles();
 
                     return Ok(());
                 }
@@ -362,10 +358,9 @@ pub fn load() -> Result<()> {
     let _ = CONFIG_LOADED.set(());
 
     THEME_CONFIG.with(|tc| {
-        if let Ok(mut guard) = tc.lock() {
-            *guard = ThemeConfig::default();
-        }
+        *tc.borrow_mut() = ThemeConfig::default();
     });
+    crate::theme::refresh_cached_styles();
 
     for error in &errors {
         eprintln!("Warning: {}", error);

@@ -1,6 +1,7 @@
 .opencode/
 target/
 .DS_Store
+samples/
 
 mdv_test.md
 PLAN.md

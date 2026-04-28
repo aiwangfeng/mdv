@@ -24,9 +24,36 @@ fn get_content_margin() -> u16 {
     config::get().content_margin
 }
 
+pub fn update_layout(app: &mut App, area: Rect) {
+    let content_margin = get_content_margin();
+    let [main_area, _status_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+
+    let show_toc = app.show_toc && (app.toc_len() > 0 || app.is_directory_mode());
+    let (_, content_area) = if show_toc {
+        let toc_pct = app.toc_width_pct.min(50);
+        let [left, right] = Layout::horizontal([
+            Constraint::Percentage(toc_pct),
+            Constraint::Percentage(100 - toc_pct),
+        ])
+        .areas(main_area);
+        app.toc_height = left.height.saturating_sub(2);
+        (Some(left), right)
+    } else {
+        app.toc_height = 0;
+        (None, main_area)
+    };
+
+    app.content_height = content_area.height.saturating_sub(2);
+    app.content_width = content_area
+        .width
+        .saturating_sub(2)
+        .saturating_sub(content_margin);
+    app.full_content_width = app.content_width;
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
     let area = frame.area();
-    let content_margin = get_content_margin();
 
     // ── Overall vertical split: content area + status bar ──────────────────
     let [main_area, status_area] =
@@ -46,17 +73,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
         (None, main_area)
     };
 
-    let inner_content_height = content_area.height.saturating_sub(2);
-    let inner_content_width = content_area
-        .width
-        .saturating_sub(2)
-        .saturating_sub(content_margin);
-    app.content_height = inner_content_height;
-    app.content_width = inner_content_width;
-    app.full_content_width = inner_content_width;
-    if let Some(ta) = toc_area {
-        app.toc_height = ta.height.saturating_sub(2);
-    }
+    update_layout(app, area);
 
     // ── Draw panels ─────────────────────────────────────────────────────────
     if let Some(ta) = toc_area {
@@ -97,14 +114,19 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
     };
     let title_style = Theme::toc_title();
 
-    let (title, items): (String, Vec<ListItem>) =
+    let (title, visible_items): (String, Vec<ListItem>) =
         if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
             // File list mode
             let title = format!(" {} files ", "📁");
+            let visible_start = app.dir_scroll;
+            let visible_end =
+                (visible_start + area.height.saturating_sub(2) as usize).min(app.dir_files.len());
             let items: Vec<ListItem> = app
                 .dir_files
                 .iter()
                 .enumerate()
+                .skip(visible_start)
+                .take(visible_end.saturating_sub(visible_start))
                 .map(|(i, entry)| {
                     let indent = "  ".repeat(entry.depth);
                     let text = format!("{}{}", indent, entry.display_name);
@@ -120,11 +142,17 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             // Normal TOC mode (headings)
             let title = format!(" {} TOC ", "📑");
+            let synced = app.synced_toc_index();
+            let visible_start = app.toc_scroll;
+            let visible_end = (visible_start + area.height.saturating_sub(2) as usize)
+                .min(app.document.toc.len());
             let items: Vec<ListItem> = app
                 .document
                 .toc
                 .iter()
                 .enumerate()
+                .skip(visible_start)
+                .take(visible_end.saturating_sub(visible_start))
                 .map(|(i, entry)| {
                     let prefix = match entry.level {
                         1 => "▌ ",
@@ -133,7 +161,7 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                     };
                     let style = if i == app.toc_cursor && focused {
                         Theme::toc_selected()
-                    } else if Some(i) == app.synced_toc_index() {
+                    } else if Some(i) == synced {
                         Theme::toc_synced()
                     } else {
                         Theme::toc_item(entry.level)
@@ -163,15 +191,6 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut list_state = ListState::default();
     list_state.select(Some(cursor.saturating_sub(scroll)));
-
-    // Render visible slice
-    let visible_start = scroll;
-    let visible_end = (scroll + inner.height as usize).min(items.len());
-    let visible_items: Vec<ListItem> = items
-        .into_iter()
-        .skip(visible_start)
-        .take(visible_end - visible_start)
-        .collect();
 
     let list = List::new(visible_items).highlight_style(Theme::toc_selected());
     frame.render_stateful_widget(list, inner, &mut list_state);
@@ -286,20 +305,14 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
                 result.push(cached.clone());
             } else if line_idx < app.rendered_lines.len() {
                 let line = app.rendered_lines[line_idx].clone();
-                let _is_current = current_match_line == Some(line_idx);
-                let lowercased = app.line_lower_ref(line_idx).unwrap_or_else(|| {
-                    line.spans
-                        .iter()
-                        .map(|s| s.content.as_ref())
-                        .collect::<String>()
-                        .to_lowercase()
-                });
+                let lowercased = app.line_lower_ref(line_idx).unwrap_or_default().to_string();
+                let search_query = app.search_query.clone();
                 let highlighted = apply_search_highlight(
                     vec![line],
-                    &app.search_query,
+                    &search_query,
                     current_match_line,
                     line_idx,
-                    Some(std::slice::from_ref(&lowercased)),
+                    Some(&[lowercased.as_str()]),
                 );
                 if let Some(hl_line) = highlighted.into_iter().next() {
                     app.cache_highlight(line_idx, hl_line.clone());

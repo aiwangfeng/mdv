@@ -2,6 +2,7 @@
 // Converts a Markdown string into a structured document tree + TOC
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::iter::Peekable;
 
 /// A single entry in the Table of Contents
 #[derive(Debug, Clone)]
@@ -65,6 +66,8 @@ pub struct Document {
     pub toc: Vec<TocEntry>,
 }
 
+type EventIter<'a> = Peekable<Parser<'a>>;
+
 pub fn parse(markdown: &str) -> Document {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
@@ -72,19 +75,14 @@ pub fn parse(markdown: &str) -> Document {
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
 
-    let parser = Parser::new_ext(markdown, opts);
-    let events: Vec<Event> = parser.collect();
-
+    let mut events = Parser::new_ext(markdown, opts).peekable();
     let mut doc = Document::default();
-    let mut pos = 0usize;
 
-    while pos < events.len() {
-        let event = get_event(&events, pos).unwrap();
+    while let Some(event) = events.next() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                pos += 1;
-                let text = extract_heading_text(&events, &mut pos);
-                let lvl = heading_level_to_u8(*level);
+                let text = extract_heading_text(&mut events);
+                let lvl = heading_level_to_u8(level);
                 let node_index = doc.nodes.len();
                 doc.toc.push(TocEntry {
                     level: lvl,
@@ -96,9 +94,8 @@ pub fn parse(markdown: &str) -> Document {
             }
 
             Event::Start(Tag::Paragraph) => {
-                pos += 1;
                 let mut spans = Vec::new();
-                collect_inline_spans(&events, &mut pos, &mut spans, TagEnd::Paragraph);
+                collect_inline_spans(&mut events, &mut spans, TagEnd::Paragraph);
                 if spans.len() == 1 {
                     if let InlineSpan::Image { src, alt } = &spans[0] {
                         doc.nodes.push(DocNode::Image {
@@ -116,17 +113,15 @@ pub fn parse(markdown: &str) -> Document {
             }
 
             Event::Start(Tag::CodeBlock(kind)) => {
-                let language = extract_language(kind);
-                pos += 1;
-                let code = extract_code_content(&events, &mut pos);
+                let language = extract_language(&kind);
+                let code = extract_code_content(&mut events);
                 doc.nodes.push(DocNode::CodeBlock { language, code });
                 doc.nodes.push(DocNode::Blank);
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
-                pos += 1;
                 let mut children: Vec<DocNode> = Vec::new();
-                collect_blockquote(&events, &mut pos, &mut children);
+                collect_blockquote(&mut events, &mut children);
                 doc.nodes.push(DocNode::BlockQuote(children));
                 doc.nodes.push(DocNode::Blank);
             }
@@ -134,16 +129,14 @@ pub fn parse(markdown: &str) -> Document {
             Event::Start(Tag::List(start_num)) => {
                 let ordered = start_num.is_some();
                 let mut counter = start_num.unwrap_or(1);
-                pos += 1;
-                collect_list_items(&events, &mut pos, &mut doc.nodes, 0, ordered, &mut counter);
+                collect_list_items(&mut events, &mut doc.nodes, 0, ordered, &mut counter);
                 doc.nodes.push(DocNode::Blank);
             }
 
             Event::Start(Tag::Table(_)) => {
-                pos += 1;
                 let mut headers: Vec<String> = Vec::new();
                 let mut rows: Vec<Vec<String>> = Vec::new();
-                collect_table(&events, &mut pos, &mut headers, &mut rows);
+                collect_table(&mut events, &mut headers, &mut rows);
                 doc.nodes.push(DocNode::Table { headers, rows });
                 doc.nodes.push(DocNode::Blank);
             }
@@ -151,7 +144,7 @@ pub fn parse(markdown: &str) -> Document {
             Event::Start(Tag::Image {
                 dest_url, title, ..
             }) => {
-                let alt = collect_image_alt_text(&events, &mut pos);
+                let alt = collect_image_alt_text(&mut events);
                 doc.nodes.push(DocNode::Image {
                     src: dest_url.to_string(),
                     alt: if alt.is_empty() {
@@ -172,7 +165,6 @@ pub fn parse(markdown: &str) -> Document {
 
             _ => {}
         }
-        pos += 1;
     }
 
     doc
@@ -189,33 +181,27 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
     }
 }
 
-fn get_event<'a>(events: &'a [Event<'a>], pos: usize) -> Option<&'a Event<'a>> {
-    events.get(pos)
-}
-
-fn extract_heading_text(events: &[Event], pos: &mut usize) -> String {
+fn extract_heading_text(events: &mut EventIter<'_>) -> String {
     let mut text = String::new();
-    while let Some(e) = get_event(events, *pos) {
+    while let Some(e) = events.next() {
         match e {
-            Event::Text(t) => text.push_str(t),
-            Event::Code(t) => text.push_str(t),
+            Event::Text(t) => text.push_str(&t),
+            Event::Code(t) => text.push_str(&t),
             Event::End(TagEnd::Heading(_)) => break,
             _ => {}
         }
-        *pos += 1;
     }
     text
 }
 
-fn extract_code_content(events: &[Event], pos: &mut usize) -> String {
+fn extract_code_content(events: &mut EventIter<'_>) -> String {
     let mut code = String::new();
-    while let Some(e) = get_event(events, *pos) {
+    while let Some(e) = events.next() {
         match e {
-            Event::Text(t) => code.push_str(t),
+            Event::Text(t) => code.push_str(&t),
             Event::End(TagEnd::CodeBlock) => break,
             _ => {}
         }
-        *pos += 1;
     }
     code
 }
@@ -234,21 +220,16 @@ fn extract_language(kind: &pulldown_cmark::CodeBlockKind) -> Option<String> {
     }
 }
 
-fn collect_inline_spans(
-    events: &[Event],
-    pos: &mut usize,
-    spans: &mut Vec<InlineSpan>,
-    end: TagEnd,
-) {
+fn collect_inline_spans(events: &mut EventIter<'_>, spans: &mut Vec<InlineSpan>, end: TagEnd) {
     let mut bold = false;
     let mut italic = false;
     let mut strike = false;
     let mut link_url: Option<String> = None;
     let mut link_text = String::new();
 
-    while *pos < events.len() {
-        match &events[*pos] {
-            Event::End(t) if t == &end => break,
+    while let Some(event) = events.next() {
+        match event {
+            Event::End(t) if t == end => break,
             Event::Start(Tag::Strong) => bold = true,
             Event::End(TagEnd::Strong) => bold = false,
             Event::Start(Tag::Emphasis) => italic = true,
@@ -271,7 +252,7 @@ fn collect_inline_spans(
             Event::Start(Tag::Image {
                 dest_url, title, ..
             }) => {
-                let alt = collect_image_alt_text(events, pos);
+                let alt = collect_image_alt_text(events);
                 spans.push(InlineSpan::Image {
                     src: dest_url.to_string(),
                     alt: if alt.is_empty() {
@@ -283,7 +264,7 @@ fn collect_inline_spans(
             }
             Event::Text(t) => {
                 if link_url.is_some() {
-                    link_text.push_str(t);
+                    link_text.push_str(&t);
                 } else if bold && italic {
                     spans.push(InlineSpan::BoldItalic(t.to_string()));
                 } else if bold {
@@ -303,44 +284,39 @@ fn collect_inline_spans(
             Event::HardBreak => spans.push(InlineSpan::HardBreak),
             _ => {}
         }
-        *pos += 1;
     }
 }
 
-fn collect_image_alt_text(events: &[Event], pos: &mut usize) -> String {
-    *pos += 1;
+fn collect_image_alt_text(events: &mut EventIter<'_>) -> String {
     let mut alt = String::new();
 
-    while *pos < events.len() {
-        match &events[*pos] {
+    while let Some(event) = events.next() {
+        match event {
             Event::End(TagEnd::Image) => break,
-            Event::Text(t) | Event::Code(t) => alt.push_str(t),
+            Event::Text(t) | Event::Code(t) => alt.push_str(&t),
             Event::SoftBreak | Event::HardBreak => alt.push(' '),
             _ => {}
         }
-        *pos += 1;
     }
 
     alt
 }
 
-fn collect_blockquote(events: &[Event], pos: &mut usize, children: &mut Vec<DocNode>) {
-    while *pos < events.len() {
-        match &events[*pos] {
+fn collect_blockquote(events: &mut EventIter<'_>, children: &mut Vec<DocNode>) {
+    while let Some(event) = events.next() {
+        match event {
             Event::End(TagEnd::BlockQuote(_)) => break,
             Event::Start(Tag::Heading { level, .. }) => {
-                *pos += 1;
-                let text = extract_heading_text(events, pos);
+                let text = extract_heading_text(events);
                 children.push(DocNode::Heading {
-                    level: heading_level_to_u8(*level),
+                    level: heading_level_to_u8(level),
                     text,
                 });
                 children.push(DocNode::Blank);
             }
             Event::Start(Tag::Paragraph) => {
-                *pos += 1;
                 let mut spans = Vec::new();
-                collect_inline_spans(events, pos, &mut spans, TagEnd::Paragraph);
+                collect_inline_spans(events, &mut spans, TagEnd::Paragraph);
                 if spans.len() == 1 {
                     if let InlineSpan::Image { src, alt } = &spans[0] {
                         children.push(DocNode::Image {
@@ -357,38 +333,34 @@ fn collect_blockquote(events: &[Event], pos: &mut usize, children: &mut Vec<DocN
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                let language = extract_language(kind);
-                *pos += 1;
-                let code = extract_code_content(events, pos);
+                let language = extract_language(&kind);
+                let code = extract_code_content(events);
                 children.push(DocNode::CodeBlock { language, code });
                 children.push(DocNode::Blank);
             }
             Event::Start(Tag::BlockQuote(_)) => {
-                *pos += 1;
                 let mut nested_children = Vec::new();
-                collect_blockquote(events, pos, &mut nested_children);
+                collect_blockquote(events, &mut nested_children);
                 children.push(DocNode::BlockQuote(nested_children));
                 children.push(DocNode::Blank);
             }
             Event::Start(Tag::List(start_num)) => {
                 let ordered = start_num.is_some();
                 let mut counter = start_num.unwrap_or(1);
-                *pos += 1;
-                collect_list_items(events, pos, children, 0, ordered, &mut counter);
+                collect_list_items(events, children, 0, ordered, &mut counter);
                 children.push(DocNode::Blank);
             }
             Event::Start(Tag::Table(_)) => {
-                *pos += 1;
                 let mut headers = Vec::new();
                 let mut rows = Vec::new();
-                collect_table(events, pos, &mut headers, &mut rows);
+                collect_table(events, &mut headers, &mut rows);
                 children.push(DocNode::Table { headers, rows });
                 children.push(DocNode::Blank);
             }
             Event::Start(Tag::Image {
                 dest_url, title, ..
             }) => {
-                let alt = collect_image_alt_text(events, pos);
+                let alt = collect_image_alt_text(events);
                 children.push(DocNode::Image {
                     src: dest_url.to_string(),
                     alt: if alt.is_empty() {
@@ -406,23 +378,20 @@ fn collect_blockquote(events: &[Event], pos: &mut usize, children: &mut Vec<DocN
             Event::HardBreak | Event::SoftBreak => {}
             _ => {}
         }
-        *pos += 1;
     }
 }
 
 fn collect_list_items(
-    events: &[Event],
-    pos: &mut usize,
+    events: &mut EventIter<'_>,
     nodes: &mut Vec<DocNode>,
     depth: usize,
     ordered: bool,
     counter: &mut u64,
 ) {
-    while *pos < events.len() {
-        match &events[*pos] {
+    while let Some(event) = events.next() {
+        match event {
             Event::End(TagEnd::List(_)) => break,
             Event::Start(Tag::Item) => {
-                *pos += 1;
                 let mut spans = Vec::new();
                 let number = if ordered {
                     let n = *counter;
@@ -431,31 +400,25 @@ fn collect_list_items(
                 } else {
                     None
                 };
-                // collect inline content of item until End(Item) or nested list
-                while *pos < events.len() {
-                    match &events[*pos] {
+                while let Some(item_event) = events.next() {
+                    match item_event {
                         Event::End(TagEnd::Item) => break,
                         Event::Start(Tag::Paragraph) => {
-                            *pos += 1;
-                            collect_inline_spans(events, pos, &mut spans, TagEnd::Paragraph);
+                            collect_inline_spans(events, &mut spans, TagEnd::Paragraph);
                         }
                         Event::Start(Tag::List(start)) => {
-                            // flush current spans first
                             if !spans.is_empty() {
                                 nodes.push(DocNode::ListItem {
                                     depth,
                                     ordered,
                                     number,
-                                    children: spans.clone(),
+                                    children: std::mem::take(&mut spans),
                                 });
-                                spans.clear();
                             }
                             let child_ordered = start.is_some();
                             let mut child_counter = start.unwrap_or(1);
-                            *pos += 1;
                             collect_list_items(
                                 events,
-                                pos,
                                 nodes,
                                 depth + 1,
                                 child_ordered,
@@ -471,7 +434,6 @@ fn collect_list_items(
                         Event::SoftBreak => spans.push(InlineSpan::SoftBreak),
                         _ => {}
                     }
-                    *pos += 1;
                 }
                 if !spans.is_empty() {
                     nodes.push(DocNode::ListItem {
@@ -484,13 +446,11 @@ fn collect_list_items(
             }
             _ => {}
         }
-        *pos += 1;
     }
 }
 
 fn collect_table(
-    events: &[Event],
-    pos: &mut usize,
+    events: &mut EventIter<'_>,
     headers: &mut Vec<String>,
     rows: &mut Vec<Vec<String>>,
 ) {
@@ -498,8 +458,8 @@ fn collect_table(
     let mut current_row: Vec<String> = Vec::new();
     let mut current_cell = String::new();
 
-    while *pos < events.len() {
-        match &events[*pos] {
+    while let Some(event) = events.next() {
+        match event {
             Event::End(TagEnd::Table) => break,
             Event::Start(Tag::TableHead) => in_head = true,
             Event::End(TagEnd::TableHead) => {
@@ -533,11 +493,10 @@ fn collect_table(
                 current_row.push(current_cell.trim().to_string());
                 current_cell.clear();
             }
-            Event::Text(t) => current_cell.push_str(t),
-            Event::Code(t) => current_cell.push_str(t),
+            Event::Text(t) => current_cell.push_str(&t),
+            Event::Code(t) => current_cell.push_str(&t),
             _ => {}
         }
-        *pos += 1;
     }
 }
 

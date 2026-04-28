@@ -79,6 +79,22 @@ fn get_base_dir(file_path: &Path) -> &Path {
     file_path.parent().unwrap_or_else(|| Path::new("."))
 }
 
+fn load_visible_images(app: &App, img_mgr: &mut ImageManager) {
+    if !img_mgr.is_enabled() || app.directory_mode {
+        return;
+    }
+
+    let base_dir = get_base_dir(&app.file_path);
+    let overscan = app.content_height as usize + renderer::IMAGE_RENDER_HEIGHT;
+    let start = app.scroll.saturating_sub(overscan);
+    let end = app.scroll + app.content_height as usize + overscan;
+    for (line_idx, src, _) in &app.image_positions {
+        if *line_idx >= start && *line_idx <= end {
+            img_mgr.load_async(src, base_dir);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -148,14 +164,6 @@ fn main() -> Result<()> {
     // Image manager
     let mut img_mgr = ImageManager::new(cli.no_images);
 
-    // Pre-load images for the current file (if any)
-    if img_mgr.is_enabled() && !app.directory_mode {
-        let base_dir = get_base_dir(&app.file_path);
-        for (_, src, _) in &app.image_positions {
-            img_mgr.load_async(src, base_dir);
-        }
-    }
-
     // ── Terminal setup ───────────────────────────────────────────────────────
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -199,28 +207,21 @@ fn run(
 ) -> Result<()> {
     let mut last_render_width = 0u16;
     let mut needs_redraw = true;
-    let mut pending_resize: Option<(u16, u16)> = None;
     let mut resize_deadline: Option<Instant> = None;
 
     loop {
-        if let (Some(_), Some(deadline)) = (pending_resize, resize_deadline) {
+        if let Some(deadline) = resize_deadline {
             if Instant::now() >= deadline {
-                pending_resize = None;
                 resize_deadline = None;
                 needs_redraw = true;
             }
         }
 
-        // Always draw first so ui.rs computes the authoritative content_width.
-        if needs_redraw {
-            terminal.draw(|frame| {
-                ui::draw(frame, app, img_mgr);
-            })?;
-            needs_redraw = false;
-        }
-
-        // After draw, ui.rs has set app.content_width and app.full_content_width.
-        // Re-render markdown if the width changed or if no rendered lines yet.
+        let size = terminal.size()?;
+        ui::update_layout(
+            app,
+            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+        );
         let cw = app.content_width;
         let fw = app.full_content_width;
         let needs_render = app.rendered_lines.is_empty() || cw != last_render_width;
@@ -231,34 +232,39 @@ fn run(
                 node_line_starts,
             } = renderer::render_nodes(&app.document.nodes, cw, fw);
             app.update_render(lines, img_pos, &node_line_starts);
-
-            if img_mgr.is_enabled() {
-                let base_dir = get_base_dir(&app.file_path);
-                for (_, src, _) in &app.image_positions {
-                    img_mgr.load_async(src, base_dir);
-                }
-            }
             last_render_width = cw;
-            // Draw again with the correctly-sized rendered lines.
-            terminal.draw(|frame| {
-                ui::draw(frame, app, img_mgr);
-            })?;
+            needs_redraw = true;
         }
 
-        app.tick_toast();
+        if app.run_pending_search() {
+            needs_redraw = true;
+        }
+
+        if app.has_active_toast() && app.tick_toast() {
+            needs_redraw = true;
+        }
 
         if img_mgr.process_incoming() {
             needs_redraw = true;
         }
 
+        if needs_redraw {
+            load_visible_images(app, img_mgr);
+            terminal.draw(|frame| {
+                ui::draw(frame, app, img_mgr);
+            })?;
+            needs_redraw = false;
+        }
+
         match rx.recv_timeout(Duration::from_millis(POLL_INTERVAL_MS)) {
             Ok(event) => {
                 if let AppEvent::Resize(w, h) = event {
-                    pending_resize = Some((w, h));
+                    let _ = (w, h);
                     resize_deadline =
                         Some(Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
+                } else {
+                    needs_redraw |= handle_app_event(app, img_mgr, event);
                 }
-                needs_redraw |= handle_app_event(app, img_mgr, event);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
@@ -266,10 +272,11 @@ fn run(
 
         while let Ok(message) = rx.try_recv() {
             if let AppEvent::Resize(w, h) = message {
-                pending_resize = Some((w, h));
+                let _ = (w, h);
                 resize_deadline = Some(Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
+            } else {
+                needs_redraw |= handle_app_event(app, img_mgr, message);
             }
-            needs_redraw |= handle_app_event(app, img_mgr, message);
         }
 
         if app.quit {
@@ -323,10 +330,9 @@ fn handle_app_event(app: &mut App, img_mgr: &mut ImageManager, event: AppEvent) 
             if app.first_run {
                 app.first_run = false;
             }
-            handle_key(app, img_mgr, code, modifiers);
-            true
+            handle_key(app, img_mgr, code, modifiers)
         }
-        AppEvent::Resize(_, _) => true,
+        AppEvent::Resize(_, _) => false,
         AppEvent::InputClosed => {
             app.quit = true;
             false
@@ -338,7 +344,12 @@ fn handle_app_event(app: &mut App, img_mgr: &mut ImageManager, event: AppEvent) 
 // Key handling
 // ---------------------------------------------------------------------------
 
-fn handle_key(app: &mut App, img_mgr: &mut ImageManager, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_key(
+    app: &mut App,
+    img_mgr: &mut ImageManager,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
     match app.mode {
         Mode::Search => handle_search_key(app, code, modifiers),
         Mode::Help => handle_help_key(app, code, modifiers),
@@ -352,35 +363,51 @@ fn handle_normal_key(
     img_mgr: &mut ImageManager,
     code: KeyCode,
     modifiers: KeyModifiers,
-) {
+) -> bool {
     if code == KeyCode::Null {
-        return;
+        return false;
     }
 
     // Directory mode key handling
     if app.is_directory_mode() {
         let keys = config::keymap();
         match app.dir_view {
-            crate::app::DirView::FileList => {
-                match code {
-                    c if keys.quit.matches(c, modifiers) => app.quit = true,
-                    c if keys.down.matches(c, modifiers) => app.dir_down(),
-                    c if keys.up.matches(c, modifiers) => app.dir_up(),
-                    c if keys.top.matches(c, modifiers) => app.dir_top(),
-                    c if keys.bottom.matches(c, modifiers) => app.dir_bottom(),
-                    KeyCode::Enter if modifiers.is_empty() => {
-                        let cursor = app.dir_cursor;
-                        let base_dir = app.dir_base.clone();
-                        let _ = app.open_file_from_dir(cursor, &base_dir, img_mgr);
-                    }
-                    _ => {}
+            crate::app::DirView::FileList => match code {
+                c if keys.quit.matches(c, modifiers) => {
+                    app.quit = true;
+                    return true;
                 }
-                return;
-            }
+                c if keys.down.matches(c, modifiers) => {
+                    let before = (app.dir_cursor, app.dir_scroll);
+                    app.dir_down();
+                    return before != (app.dir_cursor, app.dir_scroll);
+                }
+                c if keys.up.matches(c, modifiers) => {
+                    let before = (app.dir_cursor, app.dir_scroll);
+                    app.dir_up();
+                    return before != (app.dir_cursor, app.dir_scroll);
+                }
+                c if keys.top.matches(c, modifiers) => {
+                    let before = (app.dir_cursor, app.dir_scroll);
+                    app.dir_top();
+                    return before != (app.dir_cursor, app.dir_scroll);
+                }
+                c if keys.bottom.matches(c, modifiers) => {
+                    let before = (app.dir_cursor, app.dir_scroll);
+                    app.dir_bottom();
+                    return before != (app.dir_cursor, app.dir_scroll);
+                }
+                KeyCode::Enter if modifiers.is_empty() => {
+                    let cursor = app.dir_cursor;
+                    let base_dir = app.dir_base.clone();
+                    return app.open_file_from_dir(cursor, &base_dir, img_mgr);
+                }
+                _ => return false,
+            },
             crate::app::DirView::FileView => match code {
                 KeyCode::Esc | KeyCode::Backspace => {
                     app.return_to_file_list();
-                    return;
+                    return true;
                 }
                 _ => {}
             },
@@ -390,92 +417,191 @@ fn handle_normal_key(
     let keys = config::keymap();
 
     match code {
-        c if keys.quit.matches(c, modifiers) => app.quit = true,
-        c if keys.help.matches(c, modifiers) => app.toggle_help(),
+        c if keys.quit.matches(c, modifiers) => {
+            app.quit = true;
+            true
+        }
+        c if keys.help.matches(c, modifiers) => {
+            app.toggle_help();
+            true
+        }
 
         c if keys.focus_prev.matches(c, modifiers) => {
             if app.focus == Focus::Content && app.show_toc {
                 app.focus = Focus::Toc;
+                true
+            } else {
+                false
             }
         }
         c if keys.focus_next.matches(c, modifiers) => {
             if app.focus == Focus::Toc {
                 app.focus = Focus::Content;
+                true
+            } else {
+                false
             }
         }
-        KeyCode::Tab if modifiers.is_empty() => app.toggle_focus(),
-
-        c if keys.toggle_toc.matches(c, modifiers) => app.toggle_toc(),
-        c if keys.next_theme.matches(c, modifiers) => {
-            app.open_theme_picker(config::current_theme_index())
+        KeyCode::Tab if modifiers.is_empty() => {
+            app.toggle_focus();
+            true
         }
-        KeyCode::Char('<') if modifiers.is_empty() => app.narrow_toc(),
-        KeyCode::Char('>') if modifiers.is_empty() => app.widen_toc(),
+
+        c if keys.toggle_toc.matches(c, modifiers) => {
+            app.toggle_toc();
+            true
+        }
+        c if keys.next_theme.matches(c, modifiers) => {
+            app.open_theme_picker(config::current_theme_index());
+            true
+        }
+        KeyCode::Char('<') if modifiers.is_empty() => {
+            app.narrow_toc();
+            true
+        }
+        KeyCode::Char('>') if modifiers.is_empty() => {
+            app.widen_toc();
+            true
+        }
 
         c if keys.down.matches(c, modifiers) => {
+            let before = (app.scroll, app.toc_cursor, app.toc_scroll);
             if app.focus == Focus::Content {
                 app.scroll_down(1);
             } else {
                 app.toc_down();
             }
+            before != (app.scroll, app.toc_cursor, app.toc_scroll)
         }
         c if keys.up.matches(c, modifiers) => {
+            let before = (app.scroll, app.toc_cursor, app.toc_scroll);
             if app.focus == Focus::Content {
                 app.scroll_up(1);
             } else {
                 app.toc_up();
             }
+            before != (app.scroll, app.toc_cursor, app.toc_scroll)
         }
-        c if keys.toc_down.matches(c, modifiers) => app.toc_down(),
-        c if keys.toc_up.matches(c, modifiers) => app.toc_up(),
+        c if keys.toc_down.matches(c, modifiers) => {
+            let before = (app.toc_cursor, app.toc_scroll);
+            app.toc_down();
+            before != (app.toc_cursor, app.toc_scroll)
+        }
+        c if keys.toc_up.matches(c, modifiers) => {
+            let before = (app.toc_cursor, app.toc_scroll);
+            app.toc_up();
+            before != (app.toc_cursor, app.toc_scroll)
+        }
 
-        c if keys.page_down.matches(c, modifiers) => app.scroll_down(app.half_page()),
-        c if keys.page_up.matches(c, modifiers) => app.scroll_up(app.half_page()),
-        c if keys.top.matches(c, modifiers) => app.scroll_top(),
-        c if keys.bottom.matches(c, modifiers) => app.scroll_bottom(),
+        c if keys.page_down.matches(c, modifiers) => {
+            let before = app.scroll;
+            app.scroll_down(app.half_page());
+            before != app.scroll
+        }
+        c if keys.page_up.matches(c, modifiers) => {
+            let before = app.scroll;
+            app.scroll_up(app.half_page());
+            before != app.scroll
+        }
+        c if keys.top.matches(c, modifiers) => {
+            let before = app.scroll;
+            app.scroll_top();
+            before != app.scroll
+        }
+        c if keys.bottom.matches(c, modifiers) => {
+            let before = app.scroll;
+            app.scroll_bottom();
+            before != app.scroll
+        }
 
         KeyCode::Enter if modifiers.is_empty() => {
             if app.focus == Focus::Toc {
                 app.toc_jump_to_cursor();
                 app.focus = Focus::Content;
+                true
+            } else {
+                false
             }
         }
 
-        KeyCode::Char(']') if modifiers.is_empty() => app.next_heading(),
-        KeyCode::Char('[') if modifiers.is_empty() => app.prev_heading(),
+        KeyCode::Char(']') if modifiers.is_empty() => {
+            let before = app.scroll;
+            app.next_heading();
+            before != app.scroll
+        }
+        KeyCode::Char('[') if modifiers.is_empty() => {
+            let before = app.scroll;
+            app.prev_heading();
+            before != app.scroll
+        }
 
-        c if keys.search.matches(c, modifiers) => app.start_search(),
-        c if keys.search_next.matches(c, modifiers) => app.search_next(),
-        c if keys.search_prev.matches(c, modifiers) => app.search_prev(),
+        c if keys.search.matches(c, modifiers) => {
+            app.start_search();
+            true
+        }
+        c if keys.search_next.matches(c, modifiers) => {
+            let before = (app.search_current, app.scroll);
+            app.search_next();
+            before != (app.search_current, app.scroll)
+        }
+        c if keys.search_prev.matches(c, modifiers) => {
+            let before = (app.search_current, app.scroll);
+            app.search_prev();
+            before != (app.search_current, app.scroll)
+        }
 
-        _ => {}
+        _ => false,
     }
 }
 
-fn handle_search_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) {
+fn handle_search_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -> bool {
     match code {
-        KeyCode::Esc => app.search_cancel(),
-        KeyCode::Enter => app.search_confirm(),
-        KeyCode::Backspace => app.search_pop(),
-        KeyCode::Char(c) => app.search_push(c),
-        _ => {}
+        KeyCode::Esc => {
+            app.search_cancel();
+            true
+        }
+        KeyCode::Enter => {
+            app.search_confirm();
+            true
+        }
+        KeyCode::Backspace => {
+            app.search_pop();
+            true
+        }
+        KeyCode::Char(c) => {
+            app.search_push(c);
+            true
+        }
+        _ => false,
     }
 }
 
-fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     match code {
-        c if config::keymap().help.matches(c, modifiers) => app.toggle_help(),
-        KeyCode::Esc if modifiers.is_empty() => app.toggle_help(),
-        c if config::keymap().quit.matches(c, modifiers) => app.toggle_help(),
-        _ => {}
+        c if config::keymap().help.matches(c, modifiers) => {
+            app.toggle_help();
+            true
+        }
+        KeyCode::Esc if modifiers.is_empty() => {
+            app.toggle_help();
+            true
+        }
+        c if config::keymap().quit.matches(c, modifiers) => {
+            app.toggle_help();
+            true
+        }
+        _ => false,
     }
 }
 
-fn handle_theme_picker_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_theme_picker_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     let keys = config::keymap();
     let preview = |app: &mut App, delta| {
         if let Some(index) = app.move_theme_picker(delta, config::AVAILABLE_THEMES.len()) {
             config::apply_theme_by_index(index);
+            true
+        } else {
+            false
         }
     };
 
@@ -484,15 +610,20 @@ fn handle_theme_picker_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers
             if let Some(index) = app.cancel_theme_picker() {
                 config::apply_theme_by_index(index);
             }
+            true
         }
-        KeyCode::Enter if modifiers.is_empty() => app.confirm_theme_picker(),
+        KeyCode::Enter if modifiers.is_empty() => {
+            app.confirm_theme_picker();
+            true
+        }
         c if keys.quit.matches(c, modifiers) || keys.next_theme.matches(c, modifiers) => {
             if let Some(index) = app.cancel_theme_picker() {
                 config::apply_theme_by_index(index);
             }
+            true
         }
         c if keys.up.matches(c, modifiers) => preview(app, -1),
         c if keys.down.matches(c, modifiers) => preview(app, 1),
-        _ => {}
+        _ => false,
     }
 }

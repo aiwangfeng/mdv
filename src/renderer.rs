@@ -5,7 +5,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 use syntect::{
     easy::HighlightLines,
@@ -20,10 +20,10 @@ use crate::theme::Theme;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
-static HL_CACHE: OnceLock<
-    std::sync::Mutex<HashMap<(String, String), Vec<(SyntectStyle, String)>>>,
-> = OnceLock::new();
+static HL_CACHE: OnceLock<std::sync::Mutex<HighlightCache>> = OnceLock::new();
 pub const IMAGE_RENDER_HEIGHT: usize = 10;
+
+const MAX_HL_CACHE: usize = 64;
 
 const CODE_BLOCK_LEFT_BORDER: &str = "│ ";
 const CODE_BLOCK_RIGHT_BORDER: &str = "│";
@@ -70,6 +70,12 @@ pub struct RenderResult {
     pub node_line_starts: Vec<usize>,
 }
 
+#[derive(Default)]
+struct HighlightCache {
+    map: HashMap<(String, String), Vec<(SyntectStyle, String)>>,
+    order: VecDeque<(String, String)>,
+}
+
 fn get_syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
@@ -78,9 +84,29 @@ fn get_theme_set() -> &'static ThemeSet {
     THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
-fn get_hl_cache(
-) -> &'static std::sync::Mutex<HashMap<(String, String), Vec<(SyntectStyle, String)>>> {
-    HL_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+fn get_hl_cache() -> &'static std::sync::Mutex<HighlightCache> {
+    HL_CACHE.get_or_init(|| std::sync::Mutex::new(HighlightCache::default()))
+}
+
+fn get_cached_regions(cache_key: &(String, String)) -> Option<Vec<(SyntectStyle, String)>> {
+    get_hl_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.map.get(cache_key).cloned())
+}
+
+fn cache_regions(cache_key: (String, String), regions: Vec<(SyntectStyle, String)>) {
+    if let Ok(mut cache) = get_hl_cache().lock() {
+        if !cache.map.contains_key(&cache_key) {
+            cache.order.push_back(cache_key.clone());
+            while cache.order.len() > MAX_HL_CACHE {
+                if let Some(evicted) = cache.order.pop_front() {
+                    cache.map.remove(&evicted);
+                }
+            }
+        }
+        cache.map.insert(cache_key, regions);
+    }
 }
 
 /// Render a list of DocNodes into a flat list of ratatui Lines.
@@ -309,16 +335,14 @@ fn soft_wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Line<'sta
 
     for span in spans {
         let style = span.style;
-        let text = span.content.to_string();
-        let segments: Vec<&str> = text.split('\n').collect();
-        for (segment_idx, segment) in segments.iter().enumerate() {
+        let mut segments = span.content.as_ref().split('\n').peekable();
+        while let Some(segment) = segments.next() {
             if segment.is_empty() && current_line.is_empty() {
                 lines.push(Line::default());
                 continue;
             }
 
-            let words: Vec<&str> = segment.split_inclusive(' ').collect();
-            for word in words {
+            for word in segment.split_inclusive(' ') {
                 push_wrapped_chunk(
                     &mut lines,
                     &mut current_line,
@@ -329,7 +353,7 @@ fn soft_wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Line<'sta
                 );
             }
 
-            if segment_idx + 1 < segments.len() {
+            if segments.peek().is_some() {
                 lines.push(Line::from(std::mem::take(&mut current_line)));
                 current_width = 0;
             }
@@ -375,10 +399,7 @@ fn render_code_block(
     ]));
 
     let cache_key = (lang_label.to_string(), code.to_string());
-    let cached_regions = get_hl_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(&cache_key).cloned());
+    let cached_regions = get_cached_regions(&cache_key);
 
     let regions_to_render: Vec<(SyntectStyle, String)> = if let Some(cached) = cached_regions {
         cached
@@ -406,9 +427,7 @@ fn render_code_block(
             }
         }
 
-        if let Ok(mut cache) = get_hl_cache().lock() {
-            cache.insert(cache_key, all_regions.clone());
-        }
+        cache_regions(cache_key, all_regions.clone());
         all_regions
     };
 
@@ -776,7 +795,7 @@ pub fn apply_search_highlight(
     query: &str,
     current_match_line: Option<usize>,
     start_idx: usize,
-    lowercased_texts: Option<&[String]>,
+    lowercased_texts: Option<&[&str]>,
 ) -> Vec<Line<'static>> {
     if query.is_empty() {
         return lines;

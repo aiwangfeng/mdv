@@ -18,7 +18,7 @@ crossterm = { version = "0.28" }
 pulldown-cmark = { version = "0.12", default-features = false }
 
 # Syntax highlighting
-syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5.2", default-features = false, features = ["default-onig"] }
 
 # Image rendering in terminal
 ratatui-image = "6"

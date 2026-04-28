@@ -2,13 +2,17 @@
 // Central application state + event dispatch
 
 use ratatui::text::Line;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config;
 use crate::parser::Document;
+
+const SEARCH_DEBOUNCE_MS: u64 = 75;
+const MAX_SEARCH_HIGHLIGHT_CACHE: usize = 256;
+const MAX_FILE_CACHE: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -66,7 +70,7 @@ pub struct App {
 
     pub document: Arc<Document>,
     pub rendered_lines: Arc<Vec<Line<'static>>>,
-    rendered_texts_lower: HashMap<usize, String>,
+    rendered_texts_lower: Vec<Option<String>>,
     pub image_positions: Vec<(usize, String, String)>,
     pub toc_line_indices: Vec<usize>,
 
@@ -89,7 +93,10 @@ pub struct App {
     pub search_matches: Vec<usize>,
     pub search_current: usize,
     search_highlight_cache: HashMap<usize, Line<'static>>,
+    search_highlight_order: VecDeque<usize>,
     cached_search_query: Option<String>,
+    search_dirty: bool,
+    search_deadline: Option<Instant>,
     pub theme_picker_index: usize,
     theme_picker_origin: Option<usize>,
 
@@ -107,6 +114,7 @@ pub struct App {
     pub dir_scroll: usize,
     pub current_file_index: Option<usize>,
     pub file_cache: HashMap<usize, CachedDocument>,
+    file_cache_order: VecDeque<usize>,
     pub scroll_positions: HashMap<usize, usize>,
 }
 
@@ -129,7 +137,7 @@ impl App {
             file_name,
             document: Arc::new(document),
             rendered_lines: Arc::new(rendered_lines),
-            rendered_texts_lower: HashMap::new(),
+            rendered_texts_lower: vec![],
             image_positions,
             toc_line_indices,
             toc_width_pct: cfg.toc_width_pct,
@@ -147,7 +155,10 @@ impl App {
             search_matches: vec![],
             search_current: 0,
             search_highlight_cache: HashMap::new(),
+            search_highlight_order: VecDeque::new(),
             cached_search_query: None,
+            search_dirty: false,
+            search_deadline: None,
             theme_picker_index: 0,
             theme_picker_origin: None,
             toast: None,
@@ -161,6 +172,7 @@ impl App {
             dir_scroll: 0,
             current_file_index: None,
             file_cache: HashMap::new(),
+            file_cache_order: VecDeque::new(),
             scroll_positions: HashMap::new(),
         }
     }
@@ -175,7 +187,7 @@ impl App {
                 .unwrap_or_else(|| "mdv".to_string()),
             document: Arc::new(Document::default()),
             rendered_lines: Arc::new(vec![]),
-            rendered_texts_lower: HashMap::new(),
+            rendered_texts_lower: vec![],
             image_positions: vec![],
             toc_line_indices: vec![],
             toc_width_pct: cfg.toc_width_pct,
@@ -193,7 +205,10 @@ impl App {
             search_matches: vec![],
             search_current: 0,
             search_highlight_cache: HashMap::new(),
+            search_highlight_order: VecDeque::new(),
             cached_search_query: None,
+            search_dirty: false,
+            search_deadline: None,
             theme_picker_index: 0,
             theme_picker_origin: None,
             toast: None,
@@ -207,40 +222,35 @@ impl App {
             dir_scroll: 0,
             current_file_index: None,
             file_cache: HashMap::new(),
+            file_cache_order: VecDeque::new(),
             scroll_positions: HashMap::new(),
         }
     }
 
-    fn line_lower(&mut self, idx: usize) -> String {
-        if let Some(s) = self.rendered_texts_lower.get(&idx) {
-            return s.clone();
+    fn ensure_line_lower(&mut self, idx: usize) {
+        if idx >= self.rendered_lines.len() {
+            return;
         }
-        let s = self.rendered_lines[idx]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<String>()
-            .to_lowercase();
-        self.rendered_texts_lower.insert(idx, s.clone());
-        s
-    }
-
-    pub fn line_lower_ref(&mut self, idx: usize) -> Option<String> {
-        if self.rendered_texts_lower.contains_key(&idx) {
-            return self.rendered_texts_lower.get(&idx).cloned();
+        if self.rendered_texts_lower.len() != self.rendered_lines.len() {
+            self.rendered_texts_lower
+                .resize_with(self.rendered_lines.len(), || None);
         }
-        if idx < self.rendered_lines.len() {
-            let s = self.rendered_lines[idx]
+        if self.rendered_texts_lower[idx].is_none() {
+            let lower = self.rendered_lines[idx]
                 .spans
                 .iter()
-                .map(|sp| sp.content.as_ref())
+                .map(|span| span.content.as_ref())
                 .collect::<String>()
                 .to_lowercase();
-            self.rendered_texts_lower.insert(idx, s.clone());
-            Some(s)
-        } else {
-            None
+            self.rendered_texts_lower[idx] = Some(lower);
         }
+    }
+
+    pub fn line_lower_ref(&mut self, idx: usize) -> Option<&str> {
+        self.ensure_line_lower(idx);
+        self.rendered_texts_lower
+            .get(idx)
+            .and_then(|line| line.as_deref())
     }
 
     // ---------------------------------------------------------------------------
@@ -349,22 +359,22 @@ impl App {
 
     /// Jump to the next heading below current scroll
     pub fn next_heading(&mut self) {
-        if let Some(&line) = self
+        let idx = self
             .toc_line_indices
-            .iter()
-            .find(|&&line| line > self.scroll)
-        {
+            .partition_point(|&line| line <= self.scroll);
+        if let Some(&line) = self.toc_line_indices.get(idx) {
             self.scroll_to(line);
         }
     }
 
     /// Jump to the previous heading above current scroll
     pub fn prev_heading(&mut self) {
-        if let Some(&line) = self
+        let idx = self
             .toc_line_indices
-            .iter()
-            .rev()
-            .find(|&&line| line < self.scroll)
+            .partition_point(|&line| line < self.scroll);
+        if let Some(&line) = idx
+            .checked_sub(1)
+            .and_then(|i| self.toc_line_indices.get(i))
         {
             self.scroll_to(line);
         }
@@ -379,20 +389,23 @@ impl App {
         self.search_query.clear();
         self.search_matches.clear();
         self.search_current = 0;
+        self.search_dirty = false;
+        self.search_deadline = None;
         self.invalidate_search_cache();
     }
 
     pub fn search_push(&mut self, ch: char) {
         self.search_query.push(ch);
-        self.run_search();
+        self.schedule_search();
     }
 
     pub fn search_pop(&mut self) {
         self.search_query.pop();
-        self.run_search();
+        self.schedule_search();
     }
 
     pub fn search_confirm(&mut self) {
+        self.flush_search();
         self.mode = Mode::Normal;
         self.jump_to_search_current();
     }
@@ -401,19 +414,48 @@ impl App {
         self.mode = Mode::Normal;
         self.search_query.clear();
         self.search_matches.clear();
+        self.search_dirty = false;
+        self.search_deadline = None;
         self.invalidate_search_cache();
     }
 
+    fn schedule_search(&mut self) {
+        self.search_dirty = true;
+        self.search_deadline = Some(Instant::now() + Duration::from_millis(SEARCH_DEBOUNCE_MS));
+        self.invalidate_search_cache();
+    }
+
+    fn flush_search(&mut self) {
+        if self.search_dirty {
+            self.run_search();
+        }
+    }
+
+    pub fn run_pending_search(&mut self) -> bool {
+        if self.search_dirty
+            && self
+                .search_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.run_search();
+            return true;
+        }
+        false
+    }
+
     fn run_search(&mut self) {
+        self.search_dirty = false;
+        self.search_deadline = None;
         if self.search_query.is_empty() {
             self.search_matches.clear();
+            self.search_current = 0;
             return;
         }
         let q = self.search_query.to_lowercase();
         let total = self.rendered_lines.len();
         let mut matches = Vec::new();
         for i in 0..total {
-            if self.line_lower(i).contains(&q) {
+            if self.line_lower_ref(i).is_some_and(|line| line.contains(&q)) {
                 matches.push(i);
             }
         }
@@ -428,6 +470,7 @@ impl App {
     }
 
     pub fn search_next(&mut self) {
+        self.flush_search();
         if self.search_matches.is_empty() {
             return;
         }
@@ -436,6 +479,7 @@ impl App {
     }
 
     pub fn search_prev(&mut self) {
+        self.flush_search();
         if self.search_matches.is_empty() {
             return;
         }
@@ -462,11 +506,20 @@ impl App {
 
     pub fn cache_highlight(&mut self, line_idx: usize, line: Line<'static>) {
         self.cached_search_query = Some(self.search_query.clone());
+        if !self.search_highlight_cache.contains_key(&line_idx) {
+            self.search_highlight_order.push_back(line_idx);
+            while self.search_highlight_order.len() > MAX_SEARCH_HIGHLIGHT_CACHE {
+                if let Some(evicted) = self.search_highlight_order.pop_front() {
+                    self.search_highlight_cache.remove(&evicted);
+                }
+            }
+        }
         self.search_highlight_cache.insert(line_idx, line);
     }
 
     pub fn invalidate_search_cache(&mut self) {
         self.search_highlight_cache.clear();
+        self.search_highlight_order.clear();
         self.cached_search_query = None;
     }
 
@@ -478,12 +531,18 @@ impl App {
         self.toast = Some(Toast::new(message, 1500));
     }
 
-    pub fn tick_toast(&mut self) {
+    pub fn has_active_toast(&self) -> bool {
+        self.toast.is_some()
+    }
+
+    pub fn tick_toast(&mut self) -> bool {
         if let Some(ref toast) = self.toast {
             if toast.is_expired() {
                 self.toast = None;
+                return true;
             }
         }
+        false
     }
 
     pub fn toggle_toc(&mut self) {
@@ -551,12 +610,13 @@ impl App {
     // Synced TOC entry for current scroll
     // ---------------------------------------------------------------------------
     pub fn synced_toc_index(&self) -> Option<usize> {
-        self.toc_line_indices
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, line)| **line <= self.scroll)
-            .map(|(i, _)| i)
+        if self.toc_line_indices.is_empty() {
+            return None;
+        }
+        let idx = self
+            .toc_line_indices
+            .partition_point(|&line| line <= self.scroll);
+        idx.checked_sub(1)
     }
 
     pub fn update_render(
@@ -565,7 +625,7 @@ impl App {
         image_positions: Vec<(usize, String, String)>,
         node_line_starts: &[usize],
     ) {
-        self.rendered_texts_lower.clear();
+        self.rendered_texts_lower = vec![None; rendered_lines.len()];
         self.rendered_lines = Arc::new(rendered_lines);
         self.image_positions = image_positions;
         self.toc_line_indices = self
@@ -577,6 +637,43 @@ impl App {
         self.scroll = self.scroll.min(self.max_scroll());
         self.invalidate_search_cache();
         self.sync_toc_to_scroll();
+        self.sync_current_file_cache();
+    }
+
+    fn touch_file_cache(&mut self, file_index: usize) {
+        self.file_cache_order.retain(|&idx| idx != file_index);
+        self.file_cache_order.push_back(file_index);
+    }
+
+    fn insert_file_cache(&mut self, file_index: usize, cached: CachedDocument) {
+        self.file_cache.insert(file_index, cached);
+        self.touch_file_cache(file_index);
+        while self.file_cache.len() > MAX_FILE_CACHE {
+            if let Some(evicted) = self.file_cache_order.pop_front() {
+                if self.current_file_index == Some(evicted) {
+                    self.file_cache_order.push_back(evicted);
+                    continue;
+                }
+                self.file_cache.remove(&evicted);
+                self.scroll_positions.remove(&evicted);
+                break;
+            }
+        }
+    }
+
+    fn sync_current_file_cache(&mut self) {
+        if !self.directory_mode {
+            return;
+        }
+        if let Some(file_index) = self.current_file_index {
+            let cached = CachedDocument {
+                document: Arc::clone(&self.document),
+                rendered_lines: Arc::clone(&self.rendered_lines),
+                image_positions: self.image_positions.clone(),
+                toc_line_indices: self.toc_line_indices.clone(),
+            };
+            self.insert_file_cache(file_index, cached);
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -625,39 +722,39 @@ impl App {
     pub fn open_file_from_dir(
         &mut self,
         file_index: usize,
-        base_dir: &Path,
+        _base_dir: &Path,
         img_mgr: &mut crate::image_proto::ImageManager,
     ) -> bool {
         if file_index >= self.dir_files.len() {
             return false;
         }
 
-        let entry = &self.dir_files[file_index];
-        let path = &entry.path;
-
-        let markdown = match std::fs::read_to_string(path) {
-            Ok(m) => m,
-            Err(e) => {
-                log::warn!("Failed to read {}: {}", path.display(), e);
-                return false;
-            }
-        };
-
-        let document = crate::parser::parse(&markdown);
+        let path = self.dir_files[file_index].path.clone();
+        let display_name = self.dir_files[file_index].display_name.clone();
 
         if let Some(cached) = self.file_cache.get(&file_index) {
             self.document = Arc::clone(&cached.document);
             self.rendered_lines = Arc::clone(&cached.rendered_lines);
             self.image_positions = cached.image_positions.clone();
             self.toc_line_indices = cached.toc_line_indices.clone();
+            self.touch_file_cache(file_index);
         } else {
+            let markdown = match std::fs::read_to_string(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!("Failed to read {}: {}", path.display(), e);
+                    return false;
+                }
+            };
+
+            let document = crate::parser::parse(&markdown);
             let toc_line_indices: Vec<usize> = document.toc.iter().map(|e| e.node_index).collect();
             self.document = Arc::new(document);
             self.rendered_lines = Arc::new(vec![]);
             self.image_positions = vec![];
             self.toc_line_indices = toc_line_indices.clone();
 
-            self.file_cache.insert(
+            self.insert_file_cache(
                 file_index,
                 CachedDocument {
                     document: Arc::clone(&self.document),
@@ -668,14 +765,13 @@ impl App {
             );
         }
 
-        self.file_path = path.clone();
-        self.file_name = entry.display_name.clone();
+        self.rendered_texts_lower = vec![None; self.rendered_lines.len()];
+        self.search_dirty = false;
+        self.search_deadline = None;
 
-        if img_mgr.is_enabled() {
-            for (_, src, _) in &self.image_positions {
-                img_mgr.load_async(src, base_dir);
-            }
-        }
+        self.file_path = path;
+        self.file_name = display_name;
+        let _ = img_mgr;
 
         if let Some(&scroll) = self.scroll_positions.get(&file_index) {
             self.scroll = scroll.min(self.max_scroll());
@@ -712,7 +808,7 @@ mod tests {
     use super::App;
     use crate::parser::{DocNode, Document, TocEntry};
     use ratatui::text::Line;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     #[test]
     fn update_render_maps_toc_entries_to_rendered_lines() {
