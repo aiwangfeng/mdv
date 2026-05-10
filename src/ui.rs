@@ -290,34 +290,62 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
         Some(app.search_matches[app.search_current])
     };
 
-    let visible_lines = if app.search_query.is_empty() {
-        app.rendered_lines
-            .iter()
-            .skip(scroll)
-            .take(height)
-            .cloned()
-            .collect()
+    let viewport_lines = app.get_viewport_lines();
+    let viewport_offset = app.get_viewport_scroll();
+
+    let visible_lines: Vec<Line<'static>> = if app.search_query.is_empty() || viewport_lines.is_empty() {
+        // Normal view: slice the viewport cache to the visible window
+        if viewport_offset <= scroll {
+            let start = scroll - viewport_offset;
+            let end = (start + height).min(viewport_lines.len());
+            if start < end {
+                viewport_lines[start..end].to_vec()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
     } else {
+        // Search mode: render and highlight matching lines
+        // Collect the visible viewport slice first to avoid borrow conflicts
+        let visible_slice: Vec<Line<'static>> = if viewport_offset <= scroll {
+            let start = scroll - viewport_offset;
+            let end = (start + height).min(viewport_lines.len());
+            viewport_lines[start..end].to_vec()
+        } else {
+            vec![]
+        };
         let mut result = Vec::with_capacity(height);
-        for i in 0..height {
+        let q = app.search_query.to_lowercase();
+        for (i, line) in visible_slice.into_iter().enumerate() {
             let line_idx = scroll + i;
             if let Some(cached) = app.get_cached_highlight(line_idx) {
                 result.push(cached.clone());
-            } else if line_idx < app.rendered_lines.len() {
-                let line = app.rendered_lines[line_idx].clone();
-                let lowercased = app.line_lower_ref(line_idx).unwrap_or_default().to_string();
-                let search_query = app.search_query.clone();
+                continue;
+            }
+            // Check raw_line text for highlighting
+            let raw_text = app
+                .raw_lines
+                .get(line_idx)
+                .map(|s| s.to_lowercase())
+                .unwrap_or_default();
+            if raw_text.contains(&q) && line_idx == current_match_line.unwrap_or(usize::MAX) {
+                // Highlight the current match
                 let highlighted = apply_search_highlight(
                     vec![line],
-                    &search_query,
+                    &app.search_query,
                     current_match_line,
                     line_idx,
-                    Some(&[lowercased.as_str()]),
+                    Some(&[&raw_text]),
                 );
                 if let Some(hl_line) = highlighted.into_iter().next() {
-                    app.cache_highlight(line_idx, hl_line.clone());
+                    let hl = hl_line.clone();
+                    app.cache_highlight(line_idx, hl);
                     result.push(hl_line);
                 }
+            } else {
+                result.push(line);
             }
         }
         result

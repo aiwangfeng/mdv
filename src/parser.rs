@@ -5,7 +5,7 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::iter::Peekable;
 
 /// A single entry in the Table of Contents
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TocEntry {
     pub level: u8, // 1–6
     pub title: String,
@@ -14,7 +14,7 @@ pub struct TocEntry {
 }
 
 /// A renderable document node produced by the parser
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DocNode {
     Heading {
         level: u8,
@@ -46,7 +46,7 @@ pub enum DocNode {
     Blank,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InlineSpan {
     Text(String),
     Bold(String),
@@ -545,6 +545,163 @@ mod tests {
                     .any(|node| matches!(node, DocNode::CodeBlock { .. })));
             }
             other => panic!("expected blockquote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_headings_across_levels() {
+        let document = parse("# H1\n## H2\n### H3\n###### H6\n");
+        // headings produce heading nodes; toc entries map each
+        let heading_count = document.nodes.iter().filter(|n| matches!(n, DocNode::Heading { .. })).count();
+        assert_eq!(heading_count, 4, "should have 4 heading nodes, got {heading_count}");
+        assert_eq!(document.toc.len(), 4);
+        // verify levels irrespective of order/extra nodes
+        let levels: Vec<u8> = document.nodes.iter().filter_map(|n| if let DocNode::Heading { level, .. } = n { Some(*level) } else { None }).collect();
+        assert_eq!(levels, vec![1, 2, 3, 6]);
+    }
+
+    #[test]
+    fn parses_code_block_with_language() {
+        let document = parse("```rust\nfn main() {\n    println!(\"hi\");\n}\n```");
+        let code_nodes: Vec<&DocNode> = document.nodes.iter().filter(|n| matches!(n, DocNode::CodeBlock { .. })).collect();
+        assert_eq!(code_nodes.len(), 1, "should have 1 code block, got {}", code_nodes.len());
+        if let DocNode::CodeBlock { language, code } = &code_nodes[0] {
+            assert_eq!(language.as_deref(), Some("rust"));
+            assert!(code.contains("fn main()"));
+            assert!(code.contains("println!"));
+        }
+    }
+
+    #[test]
+    fn parses_code_block_without_language() {
+        let document = parse("```\nraw code\n```");
+        match &document.nodes[0] {
+            DocNode::CodeBlock { language, code } => {
+                assert!(language.is_none());
+                assert_eq!(code.trim(), "raw code");
+            }
+            other => panic!("expected CodeBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_unordered_list_items() {
+        let document = parse("- one\n- two\n- three\n");
+        let list_nodes: Vec<&DocNode> = document.nodes.iter().filter(|n| matches!(n, DocNode::ListItem { .. })).collect();
+        assert_eq!(list_nodes.len(), 3, "should have 3 list items, got {}", list_nodes.len());
+        for node in &list_nodes {
+            match node {
+                DocNode::ListItem { ordered, number, depth, .. } => {
+                    assert!(!*ordered, "should be unordered");
+                    assert_eq!(*number, None);
+                    assert_eq!(*depth, 0);
+                }
+                other => panic!("expected ListItem, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parses_ordered_list_items() {
+        let document = parse("1. first\n2. second\n");
+        let list_nodes: Vec<&DocNode> = document.nodes.iter().filter(|n| matches!(n, DocNode::ListItem { .. })).collect();
+        assert_eq!(list_nodes.len(), 2);
+        for node in &list_nodes {
+            match node {
+                DocNode::ListItem { ordered, .. } => assert!(*ordered),
+                _ => (),
+            }
+        }
+    }
+
+    #[test]
+    fn parses_table() {
+        let document = parse("| A | B |\n|---|---|\n| 1 | 2 |\n");
+        match &document.nodes[0] {
+            DocNode::Table { headers, rows } => {
+                assert_eq!(headers, &["A", "B"]);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0], ["1", "2"]);
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_thematic_break_as_rule() {
+        let document = parse("---\n\n***\n");
+        let rules: Vec<&DocNode> = document.nodes.iter().filter(|n| matches!(n, DocNode::Rule)).collect();
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn parses_inline_formatting() {
+        let document = parse("**bold** *italic* `code` ~~strike~~");
+        match &document.nodes[0] {
+            DocNode::Paragraph(spans) => {
+                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Bold(t) if t == "bold")));
+                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Italic(t) if t == "italic")));
+                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(t) if t == "code")));
+                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Strikethrough(t) if t == "strike")));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hard_break() {
+        let document = parse("line1  \nline2\n");
+        match &document.nodes[0] {
+            DocNode::Paragraph(spans) => {
+                assert!(spans.iter().any(|s| matches!(s, InlineSpan::HardBreak)));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_toc_entries_have_empty_text() {
+        let document = parse("| H1 | H2 |\n|----|----|\n| a  | b  |\n");
+        assert!(document.toc.iter().all(|e| e.title.is_empty()));
+    }
+
+    #[test]
+    fn empty_document_has_no_nodes() {
+        let document = parse("");
+        assert!(document.nodes.is_empty());
+        assert!(document.toc.is_empty());
+    }
+
+    #[test]
+    fn parses_soft_break_within_paragraph() {
+        let document = parse("hello\nworld\n");
+        match &document.nodes[0] {
+            DocNode::Paragraph(spans) => {
+                assert!(spans.iter().any(|s| matches!(s, InlineSpan::SoftBreak)));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_bold_italic_combined() {
+        let document = parse("***bold italic***");
+        match &document.nodes[0] {
+            DocNode::Paragraph(spans) => {
+                assert!(spans.iter().any(|s| matches!(s, InlineSpan::BoldItalic(t) if t == "bold italic")));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_code_with_backticks() {
+        let document = parse("`` `code` ``");
+        match &document.nodes[0] {
+            DocNode::Paragraph(spans) => {
+                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(t) if t == "`code`")));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
         }
     }
 }

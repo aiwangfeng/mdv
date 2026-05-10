@@ -288,7 +288,7 @@ pub fn get() -> &'static Config {
     if CONFIG.get().is_none() {
         let _ = load();
     }
-    CONFIG.get_or_init(|| Config::default())
+    CONFIG.get_or_init(Config::default)
 }
 
 pub fn keymap() -> &'static ResolvedKeybindings {

@@ -35,7 +35,6 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::{App, Focus, Mode};
 use image_proto::ImageManager;
-use renderer::RenderResult;
 
 enum AppEvent {
     Key {
@@ -131,23 +130,33 @@ fn main() -> Result<()> {
             }
             let markdown = fs::read_to_string(path)
                 .with_context(|| format!("Cannot read '{}'", path.display()))?;
+            let raw_lines: Vec<String> = markdown.lines().map(|l| l.to_string()).collect();
             let document = parser::parse(&markdown);
             let initial_width = 80u16;
-            let RenderResult {
-                lines: rendered_lines,
-                image_positions,
-                node_line_starts,
-            } = renderer::render_nodes(&document.nodes, initial_width, initial_width);
+            let node_heights = renderer::measure_nodes(&document.nodes, initial_width);
+            let node_line_starts = renderer::compute_line_starts(&node_heights);
+            let total_content_lines = node_line_starts
+                .last()
+                .and_then(|&last| node_heights.last().map(|&h| last + h))
+                .unwrap_or(0);
             let toc_line_indices = document
                 .toc
                 .iter()
-                .map(|entry| node_line_starts.get(entry.node_index).copied().unwrap_or(0))
+                .map(|entry| {
+                    node_line_starts
+                        .get(entry.node_index)
+                        .copied()
+                        .unwrap_or(0)
+                })
                 .collect();
             App::new(
                 path.clone(),
                 document,
-                rendered_lines,
-                image_positions,
+                raw_lines,
+                node_heights,
+                node_line_starts,
+                total_content_lines,
+                vec![],
                 toc_line_indices,
             )
         }
@@ -224,15 +233,32 @@ fn run(
         );
         let cw = app.content_width;
         let fw = app.full_content_width;
-        let needs_render = app.rendered_lines.is_empty() || cw != last_render_width;
-        if needs_render && cw > 0 {
-            let RenderResult {
-                lines,
-                image_positions: img_pos,
-                node_line_starts,
-            } = renderer::render_nodes(&app.document.nodes, cw, fw);
-            app.update_render(lines, img_pos, &node_line_starts);
+        if cw > 0 && cw != last_render_width {
+            // Width changed: re-measure (cheap) and mark viewport dirty
+            app.node_heights = renderer::measure_nodes(&app.document.nodes, cw);
+            app.node_line_starts = renderer::compute_line_starts(&app.node_heights);
+            app.total_content_lines = app
+                .node_line_starts
+                .last()
+                .and_then(|&last| app.node_heights.last().map(|&h| last + h))
+                .unwrap_or(0);
+            app.toc_line_indices = app
+                .document
+                .toc
+                .iter()
+                .map(|entry| {
+                    app.node_line_starts
+                        .get(entry.node_index)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .collect();
             last_render_width = cw;
+            app.mark_viewport_dirty();
+            needs_redraw = true;
+        }
+
+        if app.ensure_viewport_rendered(cw, fw) {
             needs_redraw = true;
         }
 

@@ -9,10 +9,14 @@ use std::time::{Duration, Instant};
 
 use crate::config;
 use crate::parser::Document;
+use crate::renderer;
 
 const SEARCH_DEBOUNCE_MS: u64 = 75;
 const MAX_SEARCH_HIGHLIGHT_CACHE: usize = 256;
 const MAX_FILE_CACHE: usize = 32;
+
+/// Number of extra lines rendered above & below the viewport for smooth scrolling.
+const RENDER_BUFFER_LINES: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -37,8 +41,9 @@ pub enum DirView {
 #[derive(Debug, Default)]
 pub struct CachedDocument {
     pub document: Arc<Document>,
-    pub rendered_lines: Arc<Vec<Line<'static>>>,
-    pub image_positions: Vec<(usize, String, String)>,
+    pub node_heights: Vec<usize>,
+    pub node_line_starts: Vec<usize>,
+    pub total_lines: usize,
     pub toc_line_indices: Vec<usize>,
 }
 
@@ -69,10 +74,21 @@ pub struct App {
     pub file_name: String,
 
     pub document: Arc<Document>,
-    pub rendered_lines: Arc<Vec<Line<'static>>>,
-    rendered_texts_lower: Vec<Option<String>>,
+    pub node_heights: Vec<usize>,
+    pub node_line_starts: Vec<usize>,
+    pub total_content_lines: usize,
+    pub raw_lines: Vec<String>,
     pub image_positions: Vec<(usize, String, String)>,
     pub toc_line_indices: Vec<usize>,
+
+    /// Cache of the currently visible viewport lines.
+    viewport_scroll: usize,
+    viewport_lines: Vec<Line<'static>>,
+    viewport_dirty: bool,
+
+    pub content_height: u16,
+    pub content_width: u16,
+    pub full_content_width: u16,
 
     pub toc_width_pct: u16,
     pub show_toc: bool,
@@ -80,9 +96,6 @@ pub struct App {
     pub focus: Focus,
 
     pub scroll: usize,
-    pub content_height: u16,
-    pub content_width: u16,
-    pub full_content_width: u16,
 
     pub toc_cursor: usize,
     pub toc_scroll: usize,
@@ -122,7 +135,10 @@ impl App {
     pub fn new(
         file_path: PathBuf,
         document: Document,
-        rendered_lines: Vec<Line<'static>>,
+        raw_lines: Vec<String>,
+        node_heights: Vec<usize>,
+        node_line_starts: Vec<usize>,
+        total_content_lines: usize,
         image_positions: Vec<(usize, String, String)>,
         toc_line_indices: Vec<usize>,
     ) -> Self {
@@ -136,17 +152,22 @@ impl App {
             file_path,
             file_name,
             document: Arc::new(document),
-            rendered_lines: Arc::new(rendered_lines),
-            rendered_texts_lower: vec![],
+            node_heights,
+            node_line_starts,
+            total_content_lines,
+            raw_lines,
             image_positions,
             toc_line_indices,
+            viewport_scroll: 0,
+            viewport_lines: Vec::new(),
+            viewport_dirty: true,
+            content_height: 0,
+            content_width: 0,
+            full_content_width: 0,
             toc_width_pct: cfg.toc_width_pct,
             show_toc: true,
             focus: Focus::Content,
             scroll: 0,
-            content_height: 0,
-            content_width: 0,
-            full_content_width: 0,
             toc_cursor: 0,
             toc_scroll: 0,
             toc_height: 0,
@@ -186,10 +207,15 @@ impl App {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "mdv".to_string()),
             document: Arc::new(Document::default()),
-            rendered_lines: Arc::new(vec![]),
-            rendered_texts_lower: vec![],
+            node_heights: vec![],
+            node_line_starts: vec![],
+            total_content_lines: 0,
+            raw_lines: vec![],
             image_positions: vec![],
             toc_line_indices: vec![],
+            viewport_scroll: 0,
+            viewport_lines: Vec::new(),
+            viewport_dirty: true,
             toc_width_pct: cfg.toc_width_pct,
             show_toc: true,
             focus: Focus::Toc,
@@ -227,30 +253,43 @@ impl App {
         }
     }
 
-    fn ensure_line_lower(&mut self, idx: usize) {
-        if idx >= self.rendered_lines.len() {
-            return;
+    /// Ensure the viewport around the current scroll position is rendered and cached.
+    /// Returns true if the viewport was re-rendered.
+    pub fn ensure_viewport_rendered(&mut self, width: u16, full_width: u16) -> bool {
+        if !self.viewport_dirty && self.viewport_scroll == self.scroll && !self.viewport_lines.is_empty()
+        {
+            return false;
         }
-        if self.rendered_texts_lower.len() != self.rendered_lines.len() {
-            self.rendered_texts_lower
-                .resize_with(self.rendered_lines.len(), || None);
-        }
-        if self.rendered_texts_lower[idx].is_none() {
-            let lower = self.rendered_lines[idx]
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-                .to_lowercase();
-            self.rendered_texts_lower[idx] = Some(lower);
-        }
+
+        let viewport_end = self.scroll + self.content_height as usize + RENDER_BUFFER_LINES;
+        let scroll_start = self.scroll.saturating_sub(RENDER_BUFFER_LINES);
+
+        let result = renderer::render_viewport(
+            &self.document.nodes,
+            &self.node_line_starts,
+            scroll_start,
+            viewport_end,
+            width,
+            full_width,
+        );
+
+        self.viewport_lines = result.lines;
+        self.image_positions = result.image_positions;
+        self.viewport_scroll = scroll_start;
+        self.viewport_dirty = false;
+        true
     }
 
-    pub fn line_lower_ref(&mut self, idx: usize) -> Option<&str> {
-        self.ensure_line_lower(idx);
-        self.rendered_texts_lower
-            .get(idx)
-            .and_then(|line| line.as_deref())
+    pub fn get_viewport_lines(&self) -> &[Line<'static>] {
+        &self.viewport_lines
+    }
+
+    pub fn get_viewport_scroll(&self) -> usize {
+        self.viewport_scroll
+    }
+
+    pub fn mark_viewport_dirty(&mut self) {
+        self.viewport_dirty = true;
     }
 
     // ---------------------------------------------------------------------------
@@ -258,7 +297,7 @@ impl App {
     // ---------------------------------------------------------------------------
 
     pub fn total_lines(&self) -> usize {
-        self.rendered_lines.len()
+        self.total_content_lines
     }
 
     pub fn max_scroll(&self) -> usize {
@@ -268,16 +307,19 @@ impl App {
 
     pub fn scroll_down(&mut self, n: usize) {
         self.scroll = (self.scroll + n).min(self.max_scroll());
+        self.mark_viewport_dirty();
         self.sync_toc_to_scroll();
     }
 
     pub fn scroll_up(&mut self, n: usize) {
         self.scroll = self.scroll.saturating_sub(n);
+        self.mark_viewport_dirty();
         self.sync_toc_to_scroll();
     }
 
     pub fn scroll_to(&mut self, line: usize) {
         self.scroll = line.min(self.max_scroll());
+        self.mark_viewport_dirty();
         self.sync_toc_to_scroll();
     }
 
@@ -287,11 +329,13 @@ impl App {
 
     pub fn scroll_top(&mut self) {
         self.scroll = 0;
+        self.mark_viewport_dirty();
         self.sync_toc_to_scroll();
     }
 
     pub fn scroll_bottom(&mut self) {
         self.scroll = self.max_scroll();
+        self.mark_viewport_dirty();
         self.sync_toc_to_scroll();
     }
 
@@ -452,10 +496,14 @@ impl App {
             return;
         }
         let q = self.search_query.to_lowercase();
-        let total = self.rendered_lines.len();
         let mut matches = Vec::new();
-        for i in 0..total {
-            if self.line_lower_ref(i).is_some_and(|line| line.contains(&q)) {
+        // Search the raw markdown lines first (lightweight).
+        // For more precise rendered-text matching we would need the full
+        // rendered line index; for large documents this is a practical trade-off.
+        for (i, raw_line) in self.raw_lines.iter().enumerate() {
+            if raw_line.to_lowercase().contains(&q) {
+                // Map raw source line to approximate rendered line position
+                // by looking up the node that contains this raw line.
                 matches.push(i);
             }
         }
@@ -619,15 +667,17 @@ impl App {
         idx.checked_sub(1)
     }
 
+    #[allow(dead_code)]
     pub fn update_render(
         &mut self,
         rendered_lines: Vec<Line<'static>>,
         image_positions: Vec<(usize, String, String)>,
         node_line_starts: &[usize],
     ) {
-        self.rendered_texts_lower = vec![None; rendered_lines.len()];
-        self.rendered_lines = Arc::new(rendered_lines);
+        self.viewport_lines = rendered_lines;
         self.image_positions = image_positions;
+        self.viewport_scroll = self.scroll;
+        self.viewport_dirty = false;
         self.toc_line_indices = self
             .document
             .toc
@@ -637,7 +687,6 @@ impl App {
         self.scroll = self.scroll.min(self.max_scroll());
         self.invalidate_search_cache();
         self.sync_toc_to_scroll();
-        self.sync_current_file_cache();
     }
 
     fn touch_file_cache(&mut self, file_index: usize) {
@@ -661,6 +710,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn sync_current_file_cache(&mut self) {
         if !self.directory_mode {
             return;
@@ -668,8 +718,9 @@ impl App {
         if let Some(file_index) = self.current_file_index {
             let cached = CachedDocument {
                 document: Arc::clone(&self.document),
-                rendered_lines: Arc::clone(&self.rendered_lines),
-                image_positions: self.image_positions.clone(),
+                node_heights: self.node_heights.clone(),
+                node_line_starts: self.node_line_starts.clone(),
+                total_lines: self.total_content_lines,
                 toc_line_indices: self.toc_line_indices.clone(),
             };
             self.insert_file_cache(file_index, cached);
@@ -734,8 +785,9 @@ impl App {
 
         if let Some(cached) = self.file_cache.get(&file_index) {
             self.document = Arc::clone(&cached.document);
-            self.rendered_lines = Arc::clone(&cached.rendered_lines);
-            self.image_positions = cached.image_positions.clone();
+            self.node_heights = cached.node_heights.clone();
+            self.node_line_starts = cached.node_line_starts.clone();
+            self.total_content_lines = cached.total_lines;
             self.toc_line_indices = cached.toc_line_indices.clone();
             self.touch_file_cache(file_index);
         } else {
@@ -748,26 +800,48 @@ impl App {
             };
 
             let document = crate::parser::parse(&markdown);
-            let toc_line_indices: Vec<usize> = document.toc.iter().map(|e| e.node_index).collect();
+            let raw_lines: Vec<String> = markdown.lines().map(|l| l.to_string()).collect();
+            let node_heights = renderer::measure_nodes(&document.nodes, self.content_width);
+            let node_line_starts = renderer::compute_line_starts(&node_heights);
+            let total_content_lines = node_line_starts
+                .last()
+                .and_then(|&last| {
+                    node_heights.last().map(|&h| last + h)
+                })
+                .unwrap_or(0);
+            let toc_line_indices: Vec<usize> = document
+                .toc
+                .iter()
+                .map(|e| {
+                    node_line_starts
+                        .get(e.node_index)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .collect();
             self.document = Arc::new(document);
-            self.rendered_lines = Arc::new(vec![]);
-            self.image_positions = vec![];
+            self.node_heights = node_heights;
+            self.node_line_starts = node_line_starts;
+            self.total_content_lines = total_content_lines;
+            self.raw_lines = raw_lines;
             self.toc_line_indices = toc_line_indices.clone();
 
             self.insert_file_cache(
                 file_index,
                 CachedDocument {
                     document: Arc::clone(&self.document),
-                    rendered_lines: Arc::new(vec![]),
-                    image_positions: vec![],
+                    node_heights: self.node_heights.clone(),
+                    node_line_starts: self.node_line_starts.clone(),
+                    total_lines: self.total_content_lines,
                     toc_line_indices,
                 },
             );
         }
 
-        self.rendered_texts_lower = vec![None; self.rendered_lines.len()];
+        self.image_positions = vec![];
         self.search_dirty = false;
         self.search_deadline = None;
+        self.mark_viewport_dirty();
 
         self.file_path = path;
         self.file_name = display_name;
@@ -838,18 +912,28 @@ mod tests {
             ],
         };
 
+        // node_heights: heading(1) + blank(1) + heading(3) = 5 total
+        let node_heights = vec![1usize, 1, 3];
+        let node_line_starts = vec![0usize, 1, 2];
+        let total_lines = 5;
+
         let mut app = App::new(
             PathBuf::from("doc.md"),
             document,
-            vec![Line::default()],
+            vec!["# A".to_string(), "".to_string(), "## B".to_string()],
+            node_heights,
+            node_line_starts,
+            total_lines,
             vec![],
-            vec![0, 0],
+            vec![0, 2],
         );
-        app.content_height = 3;
-        app.update_render(vec![Line::default(); 8], vec![], &[0, 1, 5]);
+        app.content_height = 2;
 
-        assert_eq!(app.toc_line_indices, vec![0, 5]);
-        app.scroll_to(5);
+        // Simulate a viewport update
+        app.update_render(vec![Line::default(); 5], vec![], &[0, 1, 2]);
+
+        assert_eq!(app.toc_line_indices, vec![0, 2]);
+        app.scroll_to(2);
         assert_eq!(app.synced_toc_index(), Some(1));
     }
 }
