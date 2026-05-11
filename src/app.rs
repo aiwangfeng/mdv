@@ -86,6 +86,10 @@ pub struct App {
     viewport_lines: Vec<Line<'static>>,
     viewport_dirty: bool,
 
+    /// Full-document rendered line texts (lowercased) for search.
+    full_rendered_texts: Vec<String>,
+    full_render_width: u16,
+
     pub content_height: u16,
     pub content_width: u16,
     pub full_content_width: u16,
@@ -161,6 +165,8 @@ impl App {
             viewport_scroll: 0,
             viewport_lines: Vec::new(),
             viewport_dirty: true,
+            full_rendered_texts: Vec::new(),
+            full_render_width: 0,
             content_height: 0,
             content_width: 0,
             full_content_width: 0,
@@ -216,6 +222,8 @@ impl App {
             viewport_scroll: 0,
             viewport_lines: Vec::new(),
             viewport_dirty: true,
+            full_rendered_texts: Vec::new(),
+            full_render_width: 0,
             toc_width_pct: cfg.toc_width_pct,
             show_toc: true,
             focus: Focus::Toc,
@@ -290,6 +298,47 @@ impl App {
 
     pub fn mark_viewport_dirty(&mut self) {
         self.viewport_dirty = true;
+        self.full_rendered_texts.clear();
+    }
+
+    /// Ensure full rendered line texts are available for search.
+    fn ensure_full_rendered_texts(&mut self) {
+        if !self.full_rendered_texts.is_empty()
+            && self.full_render_width == self.content_width
+        {
+            return;
+        }
+        let result = renderer::render_nodes(
+            &self.document.nodes,
+            self.content_width,
+            self.full_content_width,
+        );
+        self.full_rendered_texts = result
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .to_lowercase()
+            })
+            .collect();
+        self.full_render_width = self.content_width;
+    }
+
+    /// Check if a rendered line at `line_idx` contains the query (case-insensitive).
+    pub fn rendered_line_matches(&mut self, line_idx: usize, query_lower: &str) -> bool {
+        self.ensure_full_rendered_texts();
+        self.full_rendered_texts
+            .get(line_idx)
+            .is_some_and(|text| text.contains(query_lower))
+    }
+
+    /// Get the lowercased rendered text for a line, for search highlighting.
+    pub fn rendered_line_text_lower(&mut self, line_idx: usize) -> Option<&str> {
+        self.ensure_full_rendered_texts();
+        self.full_rendered_texts.get(line_idx).map(|s| s.as_str())
     }
 
     // ---------------------------------------------------------------------------
@@ -495,20 +544,15 @@ impl App {
             self.search_current = 0;
             return;
         }
+        self.ensure_full_rendered_texts();
         let q = self.search_query.to_lowercase();
         let mut matches = Vec::new();
-        // Search the raw markdown lines first (lightweight).
-        // For more precise rendered-text matching we would need the full
-        // rendered line index; for large documents this is a practical trade-off.
-        for (i, raw_line) in self.raw_lines.iter().enumerate() {
-            if raw_line.to_lowercase().contains(&q) {
-                // Map raw source line to approximate rendered line position
-                // by looking up the node that contains this raw line.
+        for (i, text) in self.full_rendered_texts.iter().enumerate() {
+            if text.contains(&q) {
                 matches.push(i);
             }
         }
         self.search_matches = matches;
-        // Set current to the first match at or below current scroll
         self.search_current = self
             .search_matches
             .iter()

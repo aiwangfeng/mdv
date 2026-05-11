@@ -223,11 +223,13 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
                     )]));
                 }
 
+                // Nested content starts after the top border (if present).
+                let content_offset = if !nested.lines.is_empty() { 1 } else { 0 };
                 image_positions.extend(
                     nested
                         .image_positions
                         .into_iter()
-                        .map(|(line_idx, src, alt)| (start_idx + line_idx, src, alt)),
+                        .map(|(line_idx, src, alt)| (start_idx + content_offset + line_idx, src, alt)),
                 );
             }
 

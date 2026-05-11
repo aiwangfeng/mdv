@@ -66,6 +66,8 @@
             .iter()
             .any(|span| span.content.contains("Quoted")));
         assert_eq!(rendered.image_positions.len(), 1);
+        // Image line should be after top border (line 0), heading (line 1), blank (line 2) -> line 3
+        assert_eq!(rendered.image_positions[0].0, 3);
     }
 
     #[test]

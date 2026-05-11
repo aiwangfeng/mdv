@@ -400,11 +400,48 @@ fn collect_list_items(
                 } else {
                     None
                 };
+                let mut bold = false;
+                let mut italic = false;
+                let mut strike = false;
+                let mut link_url: Option<String> = None;
+                let mut link_text = String::new();
                 while let Some(item_event) = events.next() {
                     match item_event {
                         Event::End(TagEnd::Item) => break,
                         Event::Start(Tag::Paragraph) => {
                             collect_inline_spans(events, &mut spans, TagEnd::Paragraph);
+                        }
+                        Event::Start(Tag::Strong) => bold = true,
+                        Event::End(TagEnd::Strong) => bold = false,
+                        Event::Start(Tag::Emphasis) => italic = true,
+                        Event::End(TagEnd::Emphasis) => italic = false,
+                        Event::Start(Tag::Strikethrough) => strike = true,
+                        Event::End(TagEnd::Strikethrough) => strike = false,
+                        Event::Start(Tag::Link { dest_url, .. }) => {
+                            link_url = Some(dest_url.to_string());
+                            link_text.clear();
+                        }
+                        Event::End(TagEnd::Link) => {
+                            if let Some(url) = link_url.take() {
+                                spans.push(InlineSpan::Link {
+                                    text: link_text.clone(),
+                                    url,
+                                });
+                                link_text.clear();
+                            }
+                        }
+                        Event::Start(Tag::Image {
+                            dest_url, title, ..
+                        }) => {
+                            let alt = collect_image_alt_text(events);
+                            spans.push(InlineSpan::Image {
+                                src: dest_url.to_string(),
+                                alt: if alt.is_empty() {
+                                    title.to_string()
+                                } else {
+                                    alt
+                                },
+                            });
                         }
                         Event::Start(Tag::List(start)) => {
                             if !spans.is_empty() {
@@ -426,12 +463,25 @@ fn collect_list_items(
                             );
                         }
                         Event::Text(t) => {
-                            spans.push(InlineSpan::Text(t.to_string()));
+                            if link_url.is_some() {
+                                link_text.push_str(&t);
+                            } else if bold && italic {
+                                spans.push(InlineSpan::BoldItalic(t.to_string()));
+                            } else if bold {
+                                spans.push(InlineSpan::Bold(t.to_string()));
+                            } else if italic {
+                                spans.push(InlineSpan::Italic(t.to_string()));
+                            } else if strike {
+                                spans.push(InlineSpan::Strikethrough(t.to_string()));
+                            } else {
+                                spans.push(InlineSpan::Text(t.to_string()));
+                            }
                         }
                         Event::Code(t) => {
                             spans.push(InlineSpan::Code(t.to_string()));
                         }
                         Event::SoftBreak => spans.push(InlineSpan::SoftBreak),
+                        Event::HardBreak => spans.push(InlineSpan::HardBreak),
                         _ => {}
                     }
                 }
@@ -702,6 +752,58 @@ mod tests {
                 assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(t) if t == "`code`")));
             }
             other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_items_preserve_inline_formatting() {
+        let document = parse("- **bold** *italic* `code` ~~strike~~ [link](url)\n");
+        let list_nodes: Vec<&DocNode> =
+            document.nodes.iter().filter(|n| matches!(n, DocNode::ListItem { .. })).collect();
+        assert_eq!(list_nodes.len(), 1);
+        match list_nodes[0] {
+            DocNode::ListItem { children, .. } => {
+                let kinds: Vec<&str> = children
+                    .iter()
+                    .map(|s| match s {
+                        InlineSpan::Bold(_) => "Bold",
+                        InlineSpan::Italic(_) => "Italic",
+                        InlineSpan::Code(_) => "Code",
+                        InlineSpan::Strikethrough(_) => "Strikethrough",
+                        InlineSpan::Link { .. } => "Link",
+                        InlineSpan::Text(_) => "Text",
+                        _ => "Other",
+                    })
+                    .collect();
+                // Should contain formatted spans, not just plain Text
+                assert!(kinds.contains(&"Bold"), "missing bold: {:?}", kinds);
+                assert!(kinds.contains(&"Italic"), "missing italic: {:?}", kinds);
+                assert!(kinds.contains(&"Code"), "missing code: {:?}", kinds);
+                assert!(kinds.contains(&"Strikethrough"), "missing strikethrough: {:?}", kinds);
+                assert!(kinds.contains(&"Link"), "missing link: {:?}", kinds);
+            }
+            other => panic!("expected ListItem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tight_list_without_paragraph_still_formats_bold() {
+        // Tight list: no blank lines, no Paragraph tag from pulldown-cmark
+        let document = parse("- plain **bold**\n- item2\n");
+        let list_nodes: Vec<&DocNode> =
+            document.nodes.iter().filter(|n| matches!(n, DocNode::ListItem { .. })).collect();
+        assert_eq!(list_nodes.len(), 2);
+        match list_nodes[0] {
+            DocNode::ListItem { children, .. } => {
+                assert!(
+                    children
+                        .iter()
+                        .any(|s| matches!(s, InlineSpan::Bold(t) if t == "bold")),
+                    "tight list should preserve bold: {:?}",
+                    children
+                );
+            }
+            other => panic!("expected ListItem, got {other:?}"),
         }
     }
 }

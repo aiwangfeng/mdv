@@ -317,27 +317,27 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
             vec![]
         };
         let mut result = Vec::with_capacity(height);
-        let q = app.search_query.to_lowercase();
+        let query = app.search_query.clone();
+        let q = query.to_lowercase();
         for (i, line) in visible_slice.into_iter().enumerate() {
             let line_idx = scroll + i;
             if let Some(cached) = app.get_cached_highlight(line_idx) {
                 result.push(cached.clone());
                 continue;
             }
-            // Check raw_line text for highlighting
-            let raw_text = app
-                .raw_lines
-                .get(line_idx)
-                .map(|s| s.to_lowercase())
-                .unwrap_or_default();
-            if raw_text.contains(&q) && line_idx == current_match_line.unwrap_or(usize::MAX) {
-                // Highlight the current match
+            let line_matches = app.rendered_line_matches(line_idx, &q);
+            let is_current = line_idx == current_match_line.unwrap_or(usize::MAX);
+            if line_matches && is_current {
+                let lower_text = app
+                    .rendered_line_text_lower(line_idx)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 let highlighted = apply_search_highlight(
                     vec![line],
-                    &app.search_query,
+                    &query,
                     current_match_line,
                     line_idx,
-                    Some(&[&raw_text]),
+                    Some(&[lower_text.as_str()]),
                 );
                 if let Some(hl_line) = highlighted.into_iter().next() {
                     let hl = hl_line.clone();
