@@ -3,11 +3,11 @@
 
 use crate::config;
 use ratatui::style::{Modifier, Style};
-use std::sync::{LazyLock, RwLock, RwLockReadGuard};
+use std::cell::Cell;
 
 pub struct Theme;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct CachedStyles {
     pub h1: Style,
     pub h2: Style,
@@ -45,17 +45,19 @@ pub struct CachedStyles {
     pub statusbar_mode: Style,
     pub statusbar_key: Style,
     pub statusbar_dim: Style,
+    pub bullets: [Style; 6],
 }
 
-static STYLE_CACHE: LazyLock<RwLock<CachedStyles>> =
-    LazyLock::new(|| RwLock::new(build_cached_styles()));
+thread_local! {
+    static STYLE_CACHE: Cell<CachedStyles> = Cell::new(build_cached_styles());
+}
 
-fn cached_styles() -> RwLockReadGuard<'static, CachedStyles> {
-    STYLE_CACHE.read().expect("theme style cache poisoned")
+fn cached_styles() -> CachedStyles {
+    STYLE_CACHE.get()
 }
 
 pub fn refresh_cached_styles() {
-    *STYLE_CACHE.write().expect("theme style cache poisoned") = build_cached_styles();
+    STYLE_CACHE.set(build_cached_styles());
 }
 
 fn build_cached_styles() -> CachedStyles {
@@ -146,6 +148,14 @@ fn build_cached_styles() -> CachedStyles {
             .fg(config::get_theme(|t| t.peach))
             .add_modifier(Modifier::BOLD),
         statusbar_dim: Style::default().fg(config::get_theme(|t| t.overlay0)),
+        bullets: [
+            Style::default().fg(config::get_theme(|t| t.mauve)),
+            Style::default().fg(config::get_theme(|t| t.blue)),
+            Style::default().fg(config::get_theme(|t| t.teal)),
+            Style::default().fg(config::get_theme(|t| t.green)),
+            Style::default().fg(config::get_theme(|t| t.yellow)),
+            Style::default().fg(config::get_theme(|t| t.peach)),
+        ],
     }
 }
 
@@ -223,15 +233,8 @@ impl Theme {
         cached_styles().table_row_odd
     }
     pub fn bullet(depth: usize) -> Style {
-        let colors = [
-            config::get_theme(|t| t.mauve),
-            config::get_theme(|t| t.blue),
-            config::get_theme(|t| t.teal),
-            config::get_theme(|t| t.green),
-            config::get_theme(|t| t.yellow),
-            config::get_theme(|t| t.peach),
-        ];
-        Style::default().fg(colors[depth % colors.len()])
+        let cache = cached_styles();
+        cache.bullets[depth % cache.bullets.len()]
     }
     pub fn code_block_border() -> Style {
         cached_styles().code_block_border

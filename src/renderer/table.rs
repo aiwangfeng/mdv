@@ -6,7 +6,11 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use super::{display_width, TABLE_VERTICAL_BORDER, TABLE_CELL_PADDING, TABLE_CELL_PADDING_TOTAL, TABLE_MIN_COL_WIDTH, TABLE_TOP_LEFT, TABLE_TOP_MID, TABLE_TOP_RIGHT, TABLE_MID_LEFT, TABLE_MID_MID, TABLE_MID_RIGHT, TABLE_BOTTOM_LEFT, TABLE_BOTTOM_MID, TABLE_BOTTOM_RIGHT};
+use super::{
+    display_width, TABLE_BOTTOM_LEFT, TABLE_BOTTOM_MID, TABLE_BOTTOM_RIGHT, TABLE_CELL_PADDING,
+    TABLE_CELL_PADDING_TOTAL, TABLE_MID_LEFT, TABLE_MID_MID, TABLE_MID_RIGHT, TABLE_MIN_COL_WIDTH,
+    TABLE_TOP_LEFT, TABLE_TOP_MID, TABLE_TOP_RIGHT, TABLE_VERTICAL_BORDER,
+};
 use crate::theme::Theme;
 
 pub(super) fn render_table(
@@ -72,7 +76,7 @@ pub(super) fn render_table(
         }
         // pad missing cells
         for &w in col_widths.iter().take(ncols).skip(row.len()) {
-            let empty_cell = " ".repeat(TABLE_CELL_PADDING + w);
+            let empty_cell = " ".repeat(TABLE_CELL_PADDING_TOTAL + w);
             row_spans.push(Span::styled(empty_cell, row_style));
             row_spans.push(Span::styled(TABLE_VERTICAL_BORDER, border));
         }

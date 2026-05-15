@@ -11,20 +11,32 @@ use syntect::{
     util::LinesWithEndings,
 };
 
-use super::{display_width, CODE_BLOCK_LEFT_BORDER, CODE_BLOCK_RIGHT_BORDER, CODE_BLOCK_TOP_LEFT, CODE_BLOCK_TOP_RIGHT, CODE_BLOCK_BOTTOM_LEFT, CODE_BLOCK_BOTTOM_RIGHT, CODE_BLOCK_SPACE_BEFORE_DASHES, MAX_HL_CACHE};
+use super::{
+    display_width, CODE_BLOCK_BOTTOM_LEFT, CODE_BLOCK_BOTTOM_RIGHT, CODE_BLOCK_LEFT_BORDER,
+    CODE_BLOCK_RIGHT_BORDER, CODE_BLOCK_SPACE_BEFORE_DASHES, CODE_BLOCK_TOP_LEFT,
+    CODE_BLOCK_TOP_RIGHT, MAX_HL_CACHE,
+};
 use crate::theme::Theme;
 
 // Syntax highlighting infrastructure
-static SYNTAX_SET: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
-static THEME_SET: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
-static HL_CACHE: std::sync::OnceLock<std::sync::Mutex<HighlightCache>> = std::sync::OnceLock::new();
+use std::sync::OnceLock;
+
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::cell::RefCell;
+
+thread_local! {
+    static HL_CACHE: RefCell<HighlightCache> = RefCell::new(HighlightCache::default());
+}
 
 #[derive(Default)]
 struct HighlightCache {
-    map: std::collections::HashMap<(String, String), Vec<(SyntectStyle, String)>>,
-    order: std::collections::VecDeque<(String, String)>,
+    map: std::collections::HashMap<(String, u64), Vec<(SyntectStyle, String)>>,
+    order: std::collections::VecDeque<(String, u64)>,
 }
-
 
 fn get_syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
@@ -34,19 +46,15 @@ fn get_theme_set() -> &'static ThemeSet {
     THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
-fn get_hl_cache() -> &'static std::sync::Mutex<HighlightCache> {
-    HL_CACHE.get_or_init(|| std::sync::Mutex::new(HighlightCache::default()))
+fn get_cached_regions(cache_key: &(String, u64)) -> Option<Vec<(SyntectStyle, String)>> {
+    HL_CACHE.with(|cache| {
+        cache.borrow().map.get(cache_key).cloned()
+    })
 }
 
-fn get_cached_regions(cache_key: &(String, String)) -> Option<Vec<(SyntectStyle, String)>> {
-    get_hl_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.map.get(cache_key).cloned())
-}
-
-fn cache_regions(cache_key: (String, String), regions: Vec<(SyntectStyle, String)>) {
-    if let Ok(mut cache) = get_hl_cache().lock() {
+fn cache_regions(cache_key: (String, u64), regions: Vec<(SyntectStyle, String)>) {
+    HL_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
         if !cache.map.contains_key(&cache_key) {
             cache.order.push_back(cache_key.clone());
             while cache.order.len() > MAX_HL_CACHE {
@@ -56,7 +64,7 @@ fn cache_regions(cache_key: (String, String), regions: Vec<(SyntectStyle, String
             }
         }
         cache.map.insert(cache_key, regions);
-    }
+    });
 }
 
 pub(super) fn render_code_block(
@@ -82,7 +90,9 @@ pub(super) fn render_code_block(
         Span::styled(top_right_with_space, border_style),
     ]));
 
-    let cache_key = (lang_label.to_string(), code.to_string());
+    let mut hasher = DefaultHasher::new();
+    code.hash(&mut hasher);
+    let cache_key = (lang_label.to_string(), hasher.finish());
     let cached_regions = get_cached_regions(&cache_key);
 
     let regions_to_render: Vec<(SyntectStyle, String)> = if let Some(cached) = cached_regions {
@@ -117,43 +127,16 @@ pub(super) fn render_code_block(
 
     let mut current_line_spans: Vec<Span<'static>> =
         vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
-    let mut current_line_content_width: usize = display_width(CODE_BLOCK_LEFT_BORDER);
-    let right_border_width = display_width(CODE_BLOCK_RIGHT_BORDER);
+    let mut current_line_content_width: usize = 0;
+    let max_content_width = width.saturating_sub(
+        display_width(CODE_BLOCK_LEFT_BORDER) + display_width(CODE_BLOCK_RIGHT_BORDER)
+    );
+
     for (style, text) in regions_to_render {
-        if text.ends_with('\n') {
-            if !text.is_empty() {
-                let trimmed = text.trim_end_matches('\n');
-                if !trimmed.is_empty() {
-                    let fg = syntect_color_to_ratatui(style.foreground);
-                    let bold = style
-                        .font_style
-                        .contains(syntect::highlighting::FontStyle::BOLD);
-                    let italic = style
-                        .font_style
-                        .contains(syntect::highlighting::FontStyle::ITALIC);
-                    let mut s = Style::default().fg(fg);
-                    if bold {
-                        s = s.add_modifier(Modifier::BOLD);
-                    }
-                    if italic {
-                        s = s.add_modifier(Modifier::ITALIC);
-                    }
-                    current_line_spans.push(Span::styled(trimmed.to_string(), s));
-                    current_line_content_width += display_width(trimmed);
-                }
-            }
-            let padding = width.saturating_sub(current_line_content_width + right_border_width);
-            if padding > 0 {
-                current_line_spans.push(Span::styled(" ".repeat(padding), Style::default()));
-            }
-            current_line_spans.push(Span::styled(CODE_BLOCK_RIGHT_BORDER, border_style));
-            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-            current_line_spans = vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
-            current_line_content_width = display_width(CODE_BLOCK_LEFT_BORDER);
-        } else {
-            if text.is_empty() {
-                continue;
-            }
+        let is_newline = text.ends_with('\n');
+        let text = if is_newline { text.trim_end_matches('\n') } else { &text };
+
+        if !text.is_empty() {
             let fg = syntect_color_to_ratatui(style.foreground);
             let bold = style
                 .font_style
@@ -168,13 +151,52 @@ pub(super) fn render_code_block(
             if italic {
                 s = s.add_modifier(Modifier::ITALIC);
             }
-            let text_width = display_width(&text);
-            current_line_spans.push(Span::styled(text, s));
-            current_line_content_width += text_width;
+
+            let mut current_chunk = String::new();
+
+            for c in text.chars() {
+                let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                
+                if current_line_content_width + c_width > max_content_width {
+                    if !current_chunk.is_empty() {
+                        current_line_spans.push(Span::styled(current_chunk.clone(), s));
+                        current_chunk.clear();
+                    }
+                    
+                    let padding = max_content_width.saturating_sub(current_line_content_width);
+                    if padding > 0 {
+                        current_line_spans.push(Span::styled(" ".repeat(padding), Style::default()));
+                    }
+                    current_line_spans.push(Span::styled(CODE_BLOCK_RIGHT_BORDER, border_style));
+                    lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+                    
+                    current_line_spans = vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
+                    current_line_content_width = 0;
+                }
+                
+                current_chunk.push(c);
+                current_line_content_width += c_width;
+            }
+            
+            if !current_chunk.is_empty() {
+                current_line_spans.push(Span::styled(current_chunk, s));
+            }
+        }
+
+        if is_newline {
+            let padding = max_content_width.saturating_sub(current_line_content_width);
+            if padding > 0 {
+                current_line_spans.push(Span::styled(" ".repeat(padding), Style::default()));
+            }
+            current_line_spans.push(Span::styled(CODE_BLOCK_RIGHT_BORDER, border_style));
+            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+            
+            current_line_spans = vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
+            current_line_content_width = 0;
         }
     }
-    if current_line_spans.len() > 1 {
-        let padding = width.saturating_sub(current_line_content_width + right_border_width);
+    if current_line_spans.len() > 1 || current_line_content_width > 0 {
+        let padding = max_content_width.saturating_sub(current_line_content_width);
         if padding > 0 {
             current_line_spans.push(Span::styled(" ".repeat(padding), Style::default()));
         }

@@ -205,10 +205,10 @@ impl ImageManager {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            log::warn!("$HOME is not set, defaulting to /tmp");
+    directories::BaseDirs::new()
+        .map(|base| base.home_dir().to_path_buf())
+        .unwrap_or_else(|| {
+            log::warn!("Home directory not found, defaulting to /tmp");
             PathBuf::from("/tmp")
         })
 }

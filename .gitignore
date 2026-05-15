@@ -2,6 +2,7 @@
 target/
 .DS_Store
 samples/
+.antigravitycli/
 
 mdv_test.md
 PLAN.md

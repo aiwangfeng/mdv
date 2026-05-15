@@ -49,7 +49,7 @@ pub(super) fn render_inline_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
                 result.push(Span::styled(t.clone(), Theme::strikethrough()))
             }
             InlineSpan::Link { text, url } => {
-                let _ = url;
+                log::trace!("Rendering link to URL: {}", url);
                 result.push(Span::styled(text.clone(), Theme::link()));
             }
             InlineSpan::Image { src, alt } => {
@@ -82,12 +82,13 @@ pub(super) fn soft_wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Ve
 
     for span in spans {
         let style = span.style;
-        let mut segments = span.content.as_ref().split('\n').peekable();
-        while let Some(segment) = segments.next() {
-            if segment.is_empty() && current_line.is_empty() {
-                lines.push(Line::default());
-                continue;
+        let mut first = true;
+        for segment in span.content.as_ref().split('\n') {
+            if !first {
+                lines.push(Line::from(std::mem::take(&mut current_line)));
+                current_width = 0;
             }
+            first = false;
 
             for word in segment.split_inclusive(' ') {
                 push_wrapped_chunk(
@@ -98,11 +99,6 @@ pub(super) fn soft_wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Ve
                     style,
                     max_width,
                 );
-            }
-
-            if segments.peek().is_some() {
-                lines.push(Line::from(std::mem::take(&mut current_line)));
-                current_width = 0;
             }
         }
     }

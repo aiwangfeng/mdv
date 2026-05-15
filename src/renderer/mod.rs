@@ -10,11 +10,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::parser::DocNode;
 use crate::theme::Theme;
 
-pub mod measure;
-pub mod inline;
 pub mod code;
-pub mod table;
+pub mod inline;
+pub mod measure;
 pub mod search;
+pub mod table;
 #[cfg(test)]
 mod tests;
 
@@ -68,13 +68,12 @@ pub struct RenderResult {
     pub node_line_starts: Vec<usize>,
 }
 
-
 #[inline]
 pub(super) fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-pub use measure::{measure_nodes, compute_line_starts};
+pub use measure::{compute_line_starts, measure_nodes};
 pub use search::apply_search_highlight;
 
 pub fn render_viewport(
@@ -127,16 +126,21 @@ pub fn render_viewport(
     // Adjust node_line_starts to be relative to the full document,
     // then slice lines to the viewport.
     let base = node_line_starts[first];
-    r.node_line_starts = r
-        .node_line_starts
-        .iter()
-        .map(|&s| s + base)
-        .collect();
+    r.node_line_starts = r.node_line_starts.iter().map(|&s| s + base).collect();
     r.image_positions = r
         .image_positions
         .iter()
         .map(|(line, src, alt)| (line + base, src.clone(), alt.clone()))
         .collect();
+
+    let start_idx = viewport_first.saturating_sub(base);
+    if start_idx < r.lines.len() {
+        r.lines.drain(0..start_idx);
+        let keep_len = viewport_last.saturating_sub(viewport_first);
+        r.lines.truncate(keep_len);
+    } else {
+        r.lines.clear();
+    }
     r
 }
 
@@ -156,11 +160,13 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
             DocNode::Heading { level, text } => {
                 let prefix = inline::heading_prefix(*level);
                 let style = Theme::heading(*level);
-                lines.push(Line::from(vec![
+                let spans = vec![
                     Span::styled(prefix, style),
                     Span::styled(" ", style),
                     Span::styled(text.clone(), style),
-                ]));
+                ];
+                let wrapped = inline::soft_wrap_spans(spans, w.saturating_sub(1));
+                lines.extend(wrapped);
             }
 
             DocNode::Paragraph(spans) => {
@@ -231,7 +237,9 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
                     nested
                         .image_positions
                         .into_iter()
-                        .map(|(line_idx, src, alt)| (start_idx + content_offset + line_idx, src, alt)),
+                        .map(|(line_idx, src, alt)| {
+                            (start_idx + content_offset + line_idx, src, alt)
+                        }),
                 );
             }
 

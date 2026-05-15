@@ -78,94 +78,7 @@ pub fn parse(markdown: &str) -> Document {
     let mut events = Parser::new_ext(markdown, opts).peekable();
     let mut doc = Document::default();
 
-    while let Some(event) = events.next() {
-        match event {
-            Event::Start(Tag::Heading { level, .. }) => {
-                let text = extract_heading_text(&mut events);
-                let lvl = heading_level_to_u8(level);
-                let node_index = doc.nodes.len();
-                doc.toc.push(TocEntry {
-                    level: lvl,
-                    title: text.clone(),
-                    node_index,
-                });
-                doc.nodes.push(DocNode::Heading { level: lvl, text });
-                doc.nodes.push(DocNode::Blank);
-            }
-
-            Event::Start(Tag::Paragraph) => {
-                let mut spans = Vec::new();
-                collect_inline_spans(&mut events, &mut spans, TagEnd::Paragraph);
-                if spans.len() == 1 {
-                    if let InlineSpan::Image { src, alt } = &spans[0] {
-                        doc.nodes.push(DocNode::Image {
-                            src: src.clone(),
-                            alt: alt.clone(),
-                        });
-                        doc.nodes.push(DocNode::Blank);
-                        continue;
-                    }
-                }
-                if !spans.is_empty() {
-                    doc.nodes.push(DocNode::Paragraph(spans));
-                    doc.nodes.push(DocNode::Blank);
-                }
-            }
-
-            Event::Start(Tag::CodeBlock(kind)) => {
-                let language = extract_language(&kind);
-                let code = extract_code_content(&mut events);
-                doc.nodes.push(DocNode::CodeBlock { language, code });
-                doc.nodes.push(DocNode::Blank);
-            }
-
-            Event::Start(Tag::BlockQuote(_)) => {
-                let mut children: Vec<DocNode> = Vec::new();
-                collect_blockquote(&mut events, &mut children);
-                doc.nodes.push(DocNode::BlockQuote(children));
-                doc.nodes.push(DocNode::Blank);
-            }
-
-            Event::Start(Tag::List(start_num)) => {
-                let ordered = start_num.is_some();
-                let mut counter = start_num.unwrap_or(1);
-                collect_list_items(&mut events, &mut doc.nodes, 0, ordered, &mut counter);
-                doc.nodes.push(DocNode::Blank);
-            }
-
-            Event::Start(Tag::Table(_)) => {
-                let mut headers: Vec<String> = Vec::new();
-                let mut rows: Vec<Vec<String>> = Vec::new();
-                collect_table(&mut events, &mut headers, &mut rows);
-                doc.nodes.push(DocNode::Table { headers, rows });
-                doc.nodes.push(DocNode::Blank);
-            }
-
-            Event::Start(Tag::Image {
-                dest_url, title, ..
-            }) => {
-                let alt = collect_image_alt_text(&mut events);
-                doc.nodes.push(DocNode::Image {
-                    src: dest_url.to_string(),
-                    alt: if alt.is_empty() {
-                        title.to_string()
-                    } else {
-                        alt
-                    },
-                });
-                doc.nodes.push(DocNode::Blank);
-            }
-
-            Event::Rule => {
-                doc.nodes.push(DocNode::Rule);
-                doc.nodes.push(DocNode::Blank);
-            }
-
-            Event::HardBreak | Event::SoftBreak => {}
-
-            _ => {}
-        }
-    }
+    parse_blocks(&mut events, &mut doc.nodes, Some(&mut doc.toc), false);
 
     doc
 }
@@ -183,7 +96,7 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
 
 fn extract_heading_text(events: &mut EventIter<'_>) -> String {
     let mut text = String::new();
-    while let Some(e) = events.next() {
+    for e in events.by_ref() {
         match e {
             Event::Text(t) => text.push_str(&t),
             Event::Code(t) => text.push_str(&t),
@@ -196,7 +109,7 @@ fn extract_heading_text(events: &mut EventIter<'_>) -> String {
 
 fn extract_code_content(events: &mut EventIter<'_>) -> String {
     let mut code = String::new();
-    while let Some(e) = events.next() {
+    for e in events.by_ref() {
         match e {
             Event::Text(t) => code.push_str(&t),
             Event::End(TagEnd::CodeBlock) => break,
@@ -209,7 +122,7 @@ fn extract_code_content(events: &mut EventIter<'_>) -> String {
 fn extract_language(kind: &pulldown_cmark::CodeBlockKind) -> Option<String> {
     match kind {
         pulldown_cmark::CodeBlockKind::Fenced(lang) => {
-            let s = lang.to_string();
+            let s = lang.clone().into_string();
             if s.is_empty() {
                 None
             } else {
@@ -220,77 +133,93 @@ fn extract_language(kind: &pulldown_cmark::CodeBlockKind) -> Option<String> {
     }
 }
 
-fn collect_inline_spans(events: &mut EventIter<'_>, spans: &mut Vec<InlineSpan>, end: TagEnd) {
-    let mut bold = false;
-    let mut italic = false;
-    let mut strike = false;
-    let mut link_url: Option<String> = None;
-    let mut link_text = String::new();
+#[derive(Default)]
+struct InlineState {
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    link_url: Option<String>,
+    link_text: String,
+}
 
-    while let Some(event) = events.next() {
-        match event {
-            Event::End(t) if t == end => break,
-            Event::Start(Tag::Strong) => bold = true,
-            Event::End(TagEnd::Strong) => bold = false,
-            Event::Start(Tag::Emphasis) => italic = true,
-            Event::End(TagEnd::Emphasis) => italic = false,
-            Event::Start(Tag::Strikethrough) => strike = true,
-            Event::End(TagEnd::Strikethrough) => strike = false,
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                link_url = Some(dest_url.to_string());
-                link_text.clear();
-            }
-            Event::End(TagEnd::Link) => {
-                if let Some(url) = link_url.take() {
-                    spans.push(InlineSpan::Link {
-                        text: link_text.clone(),
-                        url,
-                    });
-                    link_text.clear();
-                }
-            }
-            Event::Start(Tag::Image {
-                dest_url, title, ..
-            }) => {
-                let alt = collect_image_alt_text(events);
-                spans.push(InlineSpan::Image {
-                    src: dest_url.to_string(),
-                    alt: if alt.is_empty() {
-                        title.to_string()
-                    } else {
-                        alt
-                    },
-                });
-            }
-            Event::Text(t) => {
-                if link_url.is_some() {
-                    link_text.push_str(&t);
-                } else if bold && italic {
-                    spans.push(InlineSpan::BoldItalic(t.to_string()));
-                } else if bold {
-                    spans.push(InlineSpan::Bold(t.to_string()));
-                } else if italic {
-                    spans.push(InlineSpan::Italic(t.to_string()));
-                } else if strike {
-                    spans.push(InlineSpan::Strikethrough(t.to_string()));
-                } else {
-                    spans.push(InlineSpan::Text(t.to_string()));
-                }
-            }
-            Event::Code(t) => {
-                spans.push(InlineSpan::Code(t.to_string()));
-            }
-            Event::SoftBreak => spans.push(InlineSpan::SoftBreak),
-            Event::HardBreak => spans.push(InlineSpan::HardBreak),
-            _ => {}
+fn handle_inline_event(
+    event: Event<'_>,
+    spans: &mut Vec<InlineSpan>,
+    state: &mut InlineState,
+    events: &mut EventIter<'_>,
+) {
+    match event {
+        Event::Start(Tag::Strong) => state.bold = true,
+        Event::End(TagEnd::Strong) => state.bold = false,
+        Event::Start(Tag::Emphasis) => state.italic = true,
+        Event::End(TagEnd::Emphasis) => state.italic = false,
+        Event::Start(Tag::Strikethrough) => state.strike = true,
+        Event::End(TagEnd::Strikethrough) => state.strike = false,
+        Event::Start(Tag::Link { dest_url, .. }) => {
+            state.link_url = Some(dest_url.into_string());
+            state.link_text.clear();
         }
+        Event::End(TagEnd::Link) => {
+            if let Some(url) = state.link_url.take() {
+                spans.push(InlineSpan::Link {
+                    text: state.link_text.clone(),
+                    url,
+                });
+                state.link_text.clear();
+            }
+        }
+        Event::Start(Tag::Image {
+            dest_url, title, ..
+        }) => {
+            let alt = collect_image_alt_text(events);
+            spans.push(InlineSpan::Image {
+                src: dest_url.into_string(),
+                alt: if alt.is_empty() {
+                    title.into_string()
+                } else {
+                    alt
+                },
+            });
+        }
+        Event::Text(t) => {
+            if state.link_url.is_some() {
+                state.link_text.push_str(&t);
+            } else if state.bold && state.italic {
+                spans.push(InlineSpan::BoldItalic(t.into_string()));
+            } else if state.bold {
+                spans.push(InlineSpan::Bold(t.into_string()));
+            } else if state.italic {
+                spans.push(InlineSpan::Italic(t.into_string()));
+            } else if state.strike {
+                spans.push(InlineSpan::Strikethrough(t.into_string()));
+            } else {
+                spans.push(InlineSpan::Text(t.into_string()));
+            }
+        }
+        Event::Code(t) => {
+            spans.push(InlineSpan::Code(t.into_string()));
+        }
+        Event::SoftBreak => spans.push(InlineSpan::SoftBreak),
+        Event::HardBreak => spans.push(InlineSpan::HardBreak),
+        _ => {}
+    }
+}
+
+fn collect_inline_spans(events: &mut EventIter<'_>, spans: &mut Vec<InlineSpan>, end: TagEnd) {
+    let mut state = InlineState::default();
+    while let Some(event) = events.next() {
+        if let Event::End(ref t) = event {
+            if *t == end {
+                break;
+            }
+        }
+        handle_inline_event(event, spans, &mut state, events);
     }
 }
 
 fn collect_image_alt_text(events: &mut EventIter<'_>) -> String {
     let mut alt = String::new();
-
-    while let Some(event) = events.next() {
+    for event in events.by_ref() {
         match event {
             Event::End(TagEnd::Image) => break,
             Event::Text(t) | Event::Code(t) => alt.push_str(&t),
@@ -298,84 +227,108 @@ fn collect_image_alt_text(events: &mut EventIter<'_>) -> String {
             _ => {}
         }
     }
-
     alt
 }
 
-fn collect_blockquote(events: &mut EventIter<'_>, children: &mut Vec<DocNode>) {
+fn parse_blocks(
+    events: &mut EventIter<'_>,
+    nodes: &mut Vec<DocNode>,
+    mut toc: Option<&mut Vec<TocEntry>>,
+    is_blockquote: bool,
+) {
     while let Some(event) = events.next() {
+        if is_blockquote {
+            if let Event::End(TagEnd::BlockQuote(_)) = event {
+                break;
+            }
+        }
+
         match event {
-            Event::End(TagEnd::BlockQuote(_)) => break,
             Event::Start(Tag::Heading { level, .. }) => {
                 let text = extract_heading_text(events);
-                children.push(DocNode::Heading {
-                    level: heading_level_to_u8(level),
-                    text,
-                });
-                children.push(DocNode::Blank);
+                let lvl = heading_level_to_u8(level);
+                let node_index = nodes.len();
+                if let Some(ref mut t) = toc {
+                    t.push(TocEntry {
+                        level: lvl,
+                        title: text.clone(),
+                        node_index,
+                    });
+                }
+                nodes.push(DocNode::Heading { level: lvl, text });
+                nodes.push(DocNode::Blank);
             }
+
             Event::Start(Tag::Paragraph) => {
                 let mut spans = Vec::new();
                 collect_inline_spans(events, &mut spans, TagEnd::Paragraph);
                 if spans.len() == 1 {
                     if let InlineSpan::Image { src, alt } = &spans[0] {
-                        children.push(DocNode::Image {
+                        nodes.push(DocNode::Image {
                             src: src.clone(),
                             alt: alt.clone(),
                         });
-                        children.push(DocNode::Blank);
+                        nodes.push(DocNode::Blank);
                         continue;
                     }
                 }
                 if !spans.is_empty() {
-                    children.push(DocNode::Paragraph(spans));
-                    children.push(DocNode::Blank);
+                    nodes.push(DocNode::Paragraph(spans));
+                    nodes.push(DocNode::Blank);
                 }
             }
+
             Event::Start(Tag::CodeBlock(kind)) => {
                 let language = extract_language(&kind);
                 let code = extract_code_content(events);
-                children.push(DocNode::CodeBlock { language, code });
-                children.push(DocNode::Blank);
+                nodes.push(DocNode::CodeBlock { language, code });
+                nodes.push(DocNode::Blank);
             }
+
             Event::Start(Tag::BlockQuote(_)) => {
-                let mut nested_children = Vec::new();
-                collect_blockquote(events, &mut nested_children);
-                children.push(DocNode::BlockQuote(nested_children));
-                children.push(DocNode::Blank);
+                let mut children: Vec<DocNode> = Vec::new();
+                parse_blocks(events, &mut children, None, true);
+                nodes.push(DocNode::BlockQuote(children));
+                nodes.push(DocNode::Blank);
             }
+
             Event::Start(Tag::List(start_num)) => {
                 let ordered = start_num.is_some();
                 let mut counter = start_num.unwrap_or(1);
-                collect_list_items(events, children, 0, ordered, &mut counter);
-                children.push(DocNode::Blank);
+                collect_list_items(events, nodes, 0, ordered, &mut counter);
+                nodes.push(DocNode::Blank);
             }
+
             Event::Start(Tag::Table(_)) => {
-                let mut headers = Vec::new();
-                let mut rows = Vec::new();
+                let mut headers: Vec<String> = Vec::new();
+                let mut rows: Vec<Vec<String>> = Vec::new();
                 collect_table(events, &mut headers, &mut rows);
-                children.push(DocNode::Table { headers, rows });
-                children.push(DocNode::Blank);
+                nodes.push(DocNode::Table { headers, rows });
+                nodes.push(DocNode::Blank);
             }
+
             Event::Start(Tag::Image {
                 dest_url, title, ..
             }) => {
                 let alt = collect_image_alt_text(events);
-                children.push(DocNode::Image {
-                    src: dest_url.to_string(),
+                nodes.push(DocNode::Image {
+                    src: dest_url.into_string(),
                     alt: if alt.is_empty() {
-                        title.to_string()
+                        title.into_string()
                     } else {
                         alt
                     },
                 });
-                children.push(DocNode::Blank);
+                nodes.push(DocNode::Blank);
             }
+
             Event::Rule => {
-                children.push(DocNode::Rule);
-                children.push(DocNode::Blank);
+                nodes.push(DocNode::Rule);
+                nodes.push(DocNode::Blank);
             }
+
             Event::HardBreak | Event::SoftBreak => {}
+
             _ => {}
         }
     }
@@ -400,48 +353,12 @@ fn collect_list_items(
                 } else {
                     None
                 };
-                let mut bold = false;
-                let mut italic = false;
-                let mut strike = false;
-                let mut link_url: Option<String> = None;
-                let mut link_text = String::new();
+                let mut state = InlineState::default();
                 while let Some(item_event) = events.next() {
                     match item_event {
                         Event::End(TagEnd::Item) => break,
                         Event::Start(Tag::Paragraph) => {
                             collect_inline_spans(events, &mut spans, TagEnd::Paragraph);
-                        }
-                        Event::Start(Tag::Strong) => bold = true,
-                        Event::End(TagEnd::Strong) => bold = false,
-                        Event::Start(Tag::Emphasis) => italic = true,
-                        Event::End(TagEnd::Emphasis) => italic = false,
-                        Event::Start(Tag::Strikethrough) => strike = true,
-                        Event::End(TagEnd::Strikethrough) => strike = false,
-                        Event::Start(Tag::Link { dest_url, .. }) => {
-                            link_url = Some(dest_url.to_string());
-                            link_text.clear();
-                        }
-                        Event::End(TagEnd::Link) => {
-                            if let Some(url) = link_url.take() {
-                                spans.push(InlineSpan::Link {
-                                    text: link_text.clone(),
-                                    url,
-                                });
-                                link_text.clear();
-                            }
-                        }
-                        Event::Start(Tag::Image {
-                            dest_url, title, ..
-                        }) => {
-                            let alt = collect_image_alt_text(events);
-                            spans.push(InlineSpan::Image {
-                                src: dest_url.to_string(),
-                                alt: if alt.is_empty() {
-                                    title.to_string()
-                                } else {
-                                    alt
-                                },
-                            });
                         }
                         Event::Start(Tag::List(start)) => {
                             if !spans.is_empty() {
@@ -462,27 +379,9 @@ fn collect_list_items(
                                 &mut child_counter,
                             );
                         }
-                        Event::Text(t) => {
-                            if link_url.is_some() {
-                                link_text.push_str(&t);
-                            } else if bold && italic {
-                                spans.push(InlineSpan::BoldItalic(t.to_string()));
-                            } else if bold {
-                                spans.push(InlineSpan::Bold(t.to_string()));
-                            } else if italic {
-                                spans.push(InlineSpan::Italic(t.to_string()));
-                            } else if strike {
-                                spans.push(InlineSpan::Strikethrough(t.to_string()));
-                            } else {
-                                spans.push(InlineSpan::Text(t.to_string()));
-                            }
+                        other => {
+                            handle_inline_event(other, &mut spans, &mut state, events);
                         }
-                        Event::Code(t) => {
-                            spans.push(InlineSpan::Code(t.to_string()));
-                        }
-                        Event::SoftBreak => spans.push(InlineSpan::SoftBreak),
-                        Event::HardBreak => spans.push(InlineSpan::HardBreak),
-                        _ => {}
                     }
                 }
                 if !spans.is_empty() {
@@ -508,7 +407,7 @@ fn collect_table(
     let mut current_row: Vec<String> = Vec::new();
     let mut current_cell = String::new();
 
-    while let Some(event) = events.next() {
+    for event in events.by_ref() {
         match event {
             Event::End(TagEnd::Table) => break,
             Event::Start(Tag::TableHead) => in_head = true,
@@ -602,19 +501,45 @@ mod tests {
     fn parses_headings_across_levels() {
         let document = parse("# H1\n## H2\n### H3\n###### H6\n");
         // headings produce heading nodes; toc entries map each
-        let heading_count = document.nodes.iter().filter(|n| matches!(n, DocNode::Heading { .. })).count();
-        assert_eq!(heading_count, 4, "should have 4 heading nodes, got {heading_count}");
+        let heading_count = document
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, DocNode::Heading { .. }))
+            .count();
+        assert_eq!(
+            heading_count, 4,
+            "should have 4 heading nodes, got {heading_count}"
+        );
         assert_eq!(document.toc.len(), 4);
         // verify levels irrespective of order/extra nodes
-        let levels: Vec<u8> = document.nodes.iter().filter_map(|n| if let DocNode::Heading { level, .. } = n { Some(*level) } else { None }).collect();
+        let levels: Vec<u8> = document
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let DocNode::Heading { level, .. } = n {
+                    Some(*level)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(levels, vec![1, 2, 3, 6]);
     }
 
     #[test]
     fn parses_code_block_with_language() {
         let document = parse("```rust\nfn main() {\n    println!(\"hi\");\n}\n```");
-        let code_nodes: Vec<&DocNode> = document.nodes.iter().filter(|n| matches!(n, DocNode::CodeBlock { .. })).collect();
-        assert_eq!(code_nodes.len(), 1, "should have 1 code block, got {}", code_nodes.len());
+        let code_nodes: Vec<&DocNode> = document
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, DocNode::CodeBlock { .. }))
+            .collect();
+        assert_eq!(
+            code_nodes.len(),
+            1,
+            "should have 1 code block, got {}",
+            code_nodes.len()
+        );
         if let DocNode::CodeBlock { language, code } = &code_nodes[0] {
             assert_eq!(language.as_deref(), Some("rust"));
             assert!(code.contains("fn main()"));
@@ -637,11 +562,25 @@ mod tests {
     #[test]
     fn parses_unordered_list_items() {
         let document = parse("- one\n- two\n- three\n");
-        let list_nodes: Vec<&DocNode> = document.nodes.iter().filter(|n| matches!(n, DocNode::ListItem { .. })).collect();
-        assert_eq!(list_nodes.len(), 3, "should have 3 list items, got {}", list_nodes.len());
+        let list_nodes: Vec<&DocNode> = document
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, DocNode::ListItem { .. }))
+            .collect();
+        assert_eq!(
+            list_nodes.len(),
+            3,
+            "should have 3 list items, got {}",
+            list_nodes.len()
+        );
         for node in &list_nodes {
             match node {
-                DocNode::ListItem { ordered, number, depth, .. } => {
+                DocNode::ListItem {
+                    ordered,
+                    number,
+                    depth,
+                    ..
+                } => {
                     assert!(!*ordered, "should be unordered");
                     assert_eq!(*number, None);
                     assert_eq!(*depth, 0);
@@ -654,12 +593,15 @@ mod tests {
     #[test]
     fn parses_ordered_list_items() {
         let document = parse("1. first\n2. second\n");
-        let list_nodes: Vec<&DocNode> = document.nodes.iter().filter(|n| matches!(n, DocNode::ListItem { .. })).collect();
+        let list_nodes: Vec<&DocNode> = document
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, DocNode::ListItem { .. }))
+            .collect();
         assert_eq!(list_nodes.len(), 2);
         for node in &list_nodes {
-            match node {
-                DocNode::ListItem { ordered, .. } => assert!(*ordered),
-                _ => (),
+            if let DocNode::ListItem { ordered, .. } = node {
+                assert!(*ordered);
             }
         }
     }
@@ -680,7 +622,11 @@ mod tests {
     #[test]
     fn parses_thematic_break_as_rule() {
         let document = parse("---\n\n***\n");
-        let rules: Vec<&DocNode> = document.nodes.iter().filter(|n| matches!(n, DocNode::Rule)).collect();
+        let rules: Vec<&DocNode> = document
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, DocNode::Rule))
+            .collect();
         assert_eq!(rules.len(), 2);
     }
 
@@ -689,10 +635,18 @@ mod tests {
         let document = parse("**bold** *italic* `code` ~~strike~~");
         match &document.nodes[0] {
             DocNode::Paragraph(spans) => {
-                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Bold(t) if t == "bold")));
-                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Italic(t) if t == "italic")));
-                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(t) if t == "code")));
-                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Strikethrough(t) if t == "strike")));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Bold(t) if t == "bold")));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Italic(t) if t == "italic")));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Code(t) if t == "code")));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Strikethrough(t) if t == "strike")));
             }
             other => panic!("expected Paragraph, got {other:?}"),
         }
@@ -712,7 +666,7 @@ mod tests {
     #[test]
     fn table_toc_entries_have_empty_text() {
         let document = parse("| H1 | H2 |\n|----|----|\n| a  | b  |\n");
-        assert!(document.toc.iter().all(|e| e.title.is_empty()));
+        assert!(document.toc.is_empty());
     }
 
     #[test]
@@ -738,7 +692,9 @@ mod tests {
         let document = parse("***bold italic***");
         match &document.nodes[0] {
             DocNode::Paragraph(spans) => {
-                assert!(spans.iter().any(|s| matches!(s, InlineSpan::BoldItalic(t) if t == "bold italic")));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::BoldItalic(t) if t == "bold italic")));
             }
             other => panic!("expected Paragraph, got {other:?}"),
         }
@@ -749,7 +705,9 @@ mod tests {
         let document = parse("`` `code` ``");
         match &document.nodes[0] {
             DocNode::Paragraph(spans) => {
-                assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(t) if t == "`code`")));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Code(t) if t == "`code`")));
             }
             other => panic!("expected Paragraph, got {other:?}"),
         }
@@ -758,8 +716,11 @@ mod tests {
     #[test]
     fn list_items_preserve_inline_formatting() {
         let document = parse("- **bold** *italic* `code` ~~strike~~ [link](url)\n");
-        let list_nodes: Vec<&DocNode> =
-            document.nodes.iter().filter(|n| matches!(n, DocNode::ListItem { .. })).collect();
+        let list_nodes: Vec<&DocNode> = document
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, DocNode::ListItem { .. }))
+            .collect();
         assert_eq!(list_nodes.len(), 1);
         match list_nodes[0] {
             DocNode::ListItem { children, .. } => {
@@ -779,7 +740,11 @@ mod tests {
                 assert!(kinds.contains(&"Bold"), "missing bold: {:?}", kinds);
                 assert!(kinds.contains(&"Italic"), "missing italic: {:?}", kinds);
                 assert!(kinds.contains(&"Code"), "missing code: {:?}", kinds);
-                assert!(kinds.contains(&"Strikethrough"), "missing strikethrough: {:?}", kinds);
+                assert!(
+                    kinds.contains(&"Strikethrough"),
+                    "missing strikethrough: {:?}",
+                    kinds
+                );
                 assert!(kinds.contains(&"Link"), "missing link: {:?}", kinds);
             }
             other => panic!("expected ListItem, got {other:?}"),
@@ -790,8 +755,11 @@ mod tests {
     fn tight_list_without_paragraph_still_formats_bold() {
         // Tight list: no blank lines, no Paragraph tag from pulldown-cmark
         let document = parse("- plain **bold**\n- item2\n");
-        let list_nodes: Vec<&DocNode> =
-            document.nodes.iter().filter(|n| matches!(n, DocNode::ListItem { .. })).collect();
+        let list_nodes: Vec<&DocNode> = document
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, DocNode::ListItem { .. }))
+            .collect();
         assert_eq!(list_nodes.len(), 2);
         match list_nodes[0] {
             DocNode::ListItem { children, .. } => {

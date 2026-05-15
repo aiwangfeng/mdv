@@ -49,7 +49,6 @@ pub fn current_theme_index() -> usize {
     CURRENT_THEME_INDEX.load(Ordering::Relaxed) % AVAILABLE_THEMES.len()
 }
 
-#[allow(dead_code)]
 pub fn current_theme_name() -> &'static str {
     AVAILABLE_THEMES[current_theme_index()].display_name()
 }
@@ -283,7 +282,6 @@ impl From<ThemeColors> for ThemeConfig {
     }
 }
 
-#[allow(dead_code)]
 pub fn get() -> &'static Config {
     if CONFIG.get().is_none() {
         let _ = load();
@@ -406,7 +404,6 @@ fn parse_key_code(s: &str) -> KeyCode {
         "right" => KeyCode::Right,
         "tab" => KeyCode::Tab,
         "backspace" => KeyCode::Backspace,
-        "ctrl-c" | "c" => KeyCode::Char('c'),
         "pageup" | "pgup" => KeyCode::PageUp,
         "pagedown" | "pgdown" => KeyCode::PageDown,
         _ => {

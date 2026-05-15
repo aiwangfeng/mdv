@@ -22,6 +22,13 @@ pub fn scan_markdown_files(dir: &Path) -> Vec<DirEntry> {
 }
 
 fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntry>) {
+    if depth > 20 {
+        log::warn!(
+            "Reached maximum directory scanning depth of 20 at: {}",
+            current.display()
+        );
+        return;
+    }
     let Ok(read_dir) = fs::read_dir(current) else {
         log::warn!("Cannot read directory: {}", current.display());
         return;
@@ -30,7 +37,12 @@ fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntr
     for entry in read_dir.flatten() {
         let path = entry.path();
 
-        if path.is_dir() {
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if meta.is_dir() {
             if let Some(name) = path.file_name() {
                 let name_str = name.to_string_lossy();
                 if name_str.starts_with('.') || name_str == "target" {

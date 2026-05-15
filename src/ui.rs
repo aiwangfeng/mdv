@@ -57,7 +57,6 @@ pub fn calculate_layout(app: &mut App, area: Rect) -> LayoutResult {
         .saturating_sub(2)
         .saturating_sub(content_margin);
     app.full_content_width = app.content_width;
-
     LayoutResult {
         toc_area,
         content_area,
@@ -68,7 +67,6 @@ pub fn calculate_layout(app: &mut App, area: Rect) -> LayoutResult {
 pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
     let area = frame.area();
     let layout = calculate_layout(app, area);
-
     // ── Draw panels ─────────────────────────────────────────────────────────
     if let Some(ta) = layout.toc_area {
         draw_toc(frame, app, ta);
@@ -284,7 +282,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
         let file_count = app.dir_files.len();
         let lines = vec![
             Line::from(vec![Span::styled(
-                format!("  📁 Directory Mode  ",),
+                "  📁 Directory Mode  ".to_string(),
                 Theme::toc_title(),
             )]),
             Line::from(""),
@@ -322,7 +320,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
     }
 
     let m = if app.search_matches.is_empty() {
-        String::new()
+        "".to_string()
     } else {
         format!(" {}/{} ", app.search_current + 1, app.search_matches.len())
     };
@@ -350,12 +348,36 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
         Some(app.search_matches[app.search_current])
     };
 
+    fn borrow_line<'a>(line: &'a Line<'static>) -> Line<'a> {
+        let spans = line.spans.iter().map(|s| Span {
+            content: std::borrow::Cow::Borrowed(s.content.as_ref()),
+            style: s.style,
+        }).collect::<Vec<_>>();
+        let mut l = Line::from(spans);
+        l.alignment = line.alignment;
+        l.style = line.style;
+        l
+    }
+
     let viewport_lines = app.get_viewport_lines();
     let viewport_offset = app.get_viewport_scroll();
 
-    let visible_lines: Vec<Line<'static>> = if app.search_query.is_empty() || viewport_lines.is_empty() {
-        // Normal view: slice the viewport cache to the visible window
-        if viewport_offset <= scroll {
+    if app.search_query.is_empty() || viewport_lines.is_empty() {
+        let visible_lines: Vec<Line<'_>> = if viewport_offset <= scroll {
+            let start = scroll - viewport_offset;
+            let end = (start + height).min(viewport_lines.len());
+            if start < end {
+                viewport_lines[start..end].iter().map(borrow_line).collect()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+        let paragraph = Paragraph::new(Text::from(visible_lines)).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner_with_margin);
+    } else {
+        let visible_slice: Vec<Line<'static>> = if viewport_offset <= scroll {
             let start = scroll - viewport_offset;
             let end = (start + height).min(viewport_lines.len());
             if start < end {
@@ -363,16 +385,6 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
             } else {
                 vec![]
             }
-        } else {
-            vec![]
-        }
-    } else {
-        // Search mode: render and highlight matching lines
-        // Collect the visible viewport slice first to avoid borrow conflicts
-        let visible_slice: Vec<Line<'static>> = if viewport_offset <= scroll {
-            let start = scroll - viewport_offset;
-            let end = (start + height).min(viewport_lines.len());
-            viewport_lines[start..end].to_vec()
         } else {
             vec![]
         };
@@ -393,7 +405,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
                     .map(|s| s.to_string())
                     .unwrap_or_default();
                 let highlighted = apply_search_highlight(
-                    vec![line],
+                    vec![line.clone()],
                     &app.search_query,
                     current_match,
                     line_idx,
@@ -403,16 +415,16 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
                     let hl = hl_line.clone();
                     app.cache_highlight(line_idx, hl);
                     result.push(hl_line);
+                } else {
+                    result.push(line);
                 }
             } else {
                 result.push(line);
             }
         }
-        result
-    };
-
-    let paragraph = Paragraph::new(Text::from(visible_lines)).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, inner_with_margin);
+        let paragraph = Paragraph::new(Text::from(result)).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner_with_margin);
+    }
 
     if img_mgr.is_enabled() {
         for (line_idx, src, _alt) in &app.image_positions {
@@ -516,15 +528,14 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let right = format!("{}{}", keys_text, right_text);
 
     // Pad to fill width
-    let left_plain: String = left.spans.iter().map(|s| s.content.as_ref()).collect();
-    let pad = (area.width as usize).saturating_sub(left_plain.width() + right.as_str().width());
+    let left_width: usize = left.spans.iter().map(|s| s.content.as_ref().width()).sum();
+    let pad = (area.width as usize).saturating_sub(left_width + right.as_str().width());
 
-    // Re-build as styled line
-    let status_line = Line::from(vec![
-        Span::styled(left_plain, Theme::statusbar()),
-        Span::styled(" ".repeat(pad), Theme::statusbar()),
-        Span::styled(right, Theme::statusbar_dim()),
-    ]);
+    // Re-build as styled line preserving original left spans
+    let mut status_spans = left.spans;
+    status_spans.push(Span::styled(" ".repeat(pad), Theme::statusbar()));
+    status_spans.push(Span::styled(right, Theme::statusbar_dim()));
+    let status_line = Line::from(status_spans);
 
     let paragraph = Paragraph::new(status_line).style(Theme::statusbar());
     frame.render_widget(paragraph, area);
@@ -613,7 +624,7 @@ fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
 
     let max_key_width = items.iter().map(|(k, _)| k.width()).max().unwrap_or(10);
     let col_width = max_key_width + 4;
-    let half = (items.len() + 1) / 2;
+    let half = items.len().div_ceil(2);
     let left_items = &items[..half];
     let right_items = &items[half..];
 
