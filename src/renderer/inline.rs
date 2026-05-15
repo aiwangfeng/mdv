@@ -10,8 +10,16 @@ use super::{display_width, INLINE_CODE_PADDING};
 use crate::parser::InlineSpan;
 use crate::theme::Theme;
 
-pub(super) fn heading_prefix(level: u8) -> String {
-    "#".repeat(level as usize)
+pub(super) fn heading_prefix(level: u8) -> &'static str {
+    match level {
+        1 => "#",
+        2 => "##",
+        3 => "###",
+        4 => "####",
+        5 => "#####",
+        6 => "######",
+        _ => "######",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -19,37 +27,38 @@ pub(super) fn heading_prefix(level: u8) -> String {
 // ---------------------------------------------------------------------------
 
 pub(super) fn render_inline_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(spans.len());
     for span in spans {
         match span {
             InlineSpan::Text(t) => result.push(Span::styled(t.clone(), Theme::text())),
             InlineSpan::Bold(t) => result.push(Span::styled(t.clone(), Theme::bold())),
             InlineSpan::Italic(t) => result.push(Span::styled(t.clone(), Theme::italic())),
             InlineSpan::BoldItalic(t) => result.push(Span::styled(t.clone(), Theme::bold_italic())),
-            InlineSpan::Code(t) => result.push(Span::styled(
-                format!(
-                    "{}{}{}",
-                    " ".repeat(INLINE_CODE_PADDING),
-                    t,
-                    " ".repeat(INLINE_CODE_PADDING)
-                ),
-                Theme::inline_code(),
-            )),
+            InlineSpan::Code(t) => {
+                let mut s = String::with_capacity(t.len() + INLINE_CODE_PADDING * 2);
+                for _ in 0..INLINE_CODE_PADDING {
+                    s.push(' ');
+                }
+                s.push_str(t);
+                for _ in 0..INLINE_CODE_PADDING {
+                    s.push(' ');
+                }
+                result.push(Span::styled(s, Theme::inline_code()));
+            }
             InlineSpan::Strikethrough(t) => {
                 result.push(Span::styled(t.clone(), Theme::strikethrough()))
             }
             InlineSpan::Link { text, url } => {
-                // Note: URL is displayed as-is but not clickable in TUI.
-                // Could add optional URL display via config in the future.
                 let _ = url;
                 result.push(Span::styled(text.clone(), Theme::link()));
             }
             InlineSpan::Image { src, alt } => {
                 let label = if alt.is_empty() { src } else { alt };
-                result.push(Span::styled(
-                    format!("[image: {}]", label),
-                    Theme::subtext(),
-                ));
+                let mut s = String::with_capacity(label.len() + 10);
+                s.push_str("[image: ");
+                s.push_str(label);
+                s.push(']');
+                result.push(Span::styled(s, Theme::subtext()));
             }
             InlineSpan::SoftBreak => result.push(Span::raw(" ")),
             InlineSpan::HardBreak => result.push(Span::raw("\n")),

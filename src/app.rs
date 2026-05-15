@@ -18,6 +18,15 @@ const MAX_FILE_CACHE: usize = 32;
 /// Number of extra lines rendered above & below the viewport for smooth scrolling.
 const RENDER_BUFFER_LINES: usize = 50;
 
+/// Adjust `scroll` so that `cursor` is within the visible area of `visible_height` lines.
+fn clamp_scroll_to_cursor(cursor: usize, scroll: &mut usize, visible_height: usize) {
+    if cursor < *scroll {
+        *scroll = cursor;
+    } else if visible_height > 0 && cursor >= *scroll + visible_height {
+        *scroll = cursor.saturating_sub(visible_height - 1);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Toc,
@@ -68,6 +77,49 @@ impl Toast {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub line_idx: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+/// Result of measuring a document at a given width.
+pub(crate) struct MeasureResult {
+    pub(crate) node_heights: Vec<usize>,
+    pub(crate) node_line_starts: Vec<usize>,
+    pub(crate) total_content_lines: usize,
+    pub(crate) toc_line_indices: Vec<usize>,
+}
+
+pub(crate) fn measure_document(
+    document: &crate::parser::Document,
+    width: u16,
+) -> MeasureResult {
+    let node_heights = crate::renderer::measure_nodes(&document.nodes, width);
+    let node_line_starts = crate::renderer::compute_line_starts(&node_heights);
+    let total_content_lines = node_line_starts
+        .last()
+        .and_then(|&last| node_heights.last().map(|&h| last + h))
+        .unwrap_or(0);
+    let toc_line_indices = document
+        .toc
+        .iter()
+        .map(|entry| {
+            node_line_starts
+                .get(entry.node_index)
+                .copied()
+                .unwrap_or(0)
+        })
+        .collect();
+    MeasureResult {
+        node_heights,
+        node_line_starts,
+        total_content_lines,
+        toc_line_indices,
+    }
+}
+
 #[derive(Debug)]
 pub struct App {
     pub file_path: PathBuf,
@@ -77,7 +129,6 @@ pub struct App {
     pub node_heights: Vec<usize>,
     pub node_line_starts: Vec<usize>,
     pub total_content_lines: usize,
-    pub raw_lines: Vec<String>,
     pub image_positions: Vec<(usize, String, String)>,
     pub toc_line_indices: Vec<usize>,
 
@@ -86,8 +137,9 @@ pub struct App {
     viewport_lines: Vec<Line<'static>>,
     viewport_dirty: bool,
 
-    /// Full-document rendered line texts (lowercased) for search.
+    /// Full-document rendered line texts for search.
     full_rendered_texts: Vec<String>,
+    full_rendered_texts_lower: Vec<String>,
     full_render_width: u16,
 
     pub content_height: u16,
@@ -107,13 +159,15 @@ pub struct App {
 
     pub mode: Mode,
     pub search_query: String,
-    pub search_matches: Vec<usize>,
+    pub search_matches: Vec<SearchMatch>,
     pub search_current: usize,
     search_highlight_cache: HashMap<usize, Line<'static>>,
     search_highlight_order: VecDeque<usize>,
     cached_search_query: Option<String>,
     search_dirty: bool,
     search_deadline: Option<Instant>,
+    pub(crate) search_query_norm: String,
+    pub(crate) search_has_upper: bool,
     pub theme_picker_index: usize,
     theme_picker_origin: Option<usize>,
 
@@ -133,13 +187,16 @@ pub struct App {
     pub file_cache: HashMap<usize, CachedDocument>,
     file_cache_order: VecDeque<usize>,
     pub scroll_positions: HashMap<usize, usize>,
+
+    // Directory search
+    pub dir_search_active: bool,
+    pub dir_search_cursor: usize,
 }
 
 impl App {
     pub fn new(
         file_path: PathBuf,
         document: Document,
-        raw_lines: Vec<String>,
         node_heights: Vec<usize>,
         node_line_starts: Vec<usize>,
         total_content_lines: usize,
@@ -159,13 +216,13 @@ impl App {
             node_heights,
             node_line_starts,
             total_content_lines,
-            raw_lines,
             image_positions,
             toc_line_indices,
             viewport_scroll: 0,
             viewport_lines: Vec::new(),
             viewport_dirty: true,
             full_rendered_texts: Vec::new(),
+            full_rendered_texts_lower: Vec::new(),
             full_render_width: 0,
             content_height: 0,
             content_width: 0,
@@ -186,6 +243,8 @@ impl App {
             cached_search_query: None,
             search_dirty: false,
             search_deadline: None,
+            search_query_norm: String::new(),
+            search_has_upper: false,
             theme_picker_index: 0,
             theme_picker_origin: None,
             toast: None,
@@ -201,6 +260,8 @@ impl App {
             file_cache: HashMap::new(),
             file_cache_order: VecDeque::new(),
             scroll_positions: HashMap::new(),
+            dir_search_active: false,
+            dir_search_cursor: 0,
         }
     }
 
@@ -216,13 +277,13 @@ impl App {
             node_heights: vec![],
             node_line_starts: vec![],
             total_content_lines: 0,
-            raw_lines: vec![],
             image_positions: vec![],
             toc_line_indices: vec![],
             viewport_scroll: 0,
             viewport_lines: Vec::new(),
             viewport_dirty: true,
             full_rendered_texts: Vec::new(),
+            full_rendered_texts_lower: Vec::new(),
             full_render_width: 0,
             toc_width_pct: cfg.toc_width_pct,
             show_toc: true,
@@ -243,6 +304,8 @@ impl App {
             cached_search_query: None,
             search_dirty: false,
             search_deadline: None,
+            search_query_norm: String::new(),
+            search_has_upper: false,
             theme_picker_index: 0,
             theme_picker_origin: None,
             toast: None,
@@ -258,6 +321,8 @@ impl App {
             file_cache: HashMap::new(),
             file_cache_order: VecDeque::new(),
             scroll_positions: HashMap::new(),
+            dir_search_active: false,
+            dir_search_cursor: 0,
         }
     }
 
@@ -299,46 +364,66 @@ impl App {
     pub fn mark_viewport_dirty(&mut self) {
         self.viewport_dirty = true;
         self.full_rendered_texts.clear();
+        self.full_rendered_texts_lower.clear();
+    }
+
+    pub fn remeasure(&mut self, width: u16) {
+        let result = measure_document(&self.document, width);
+        self.node_heights = result.node_heights;
+        self.node_line_starts = result.node_line_starts;
+        self.total_content_lines = result.total_content_lines;
+        self.toc_line_indices = result.toc_line_indices;
     }
 
     /// Ensure full rendered line texts are available for search.
     fn ensure_full_rendered_texts(&mut self) {
-        if !self.full_rendered_texts.is_empty()
-            && self.full_render_width == self.content_width
-        {
+        use unicode_normalization::UnicodeNormalization;
+
+        if !self.full_rendered_texts.is_empty() && self.full_render_width == self.content_width {
             return;
         }
+
         let result = renderer::render_nodes(
             &self.document.nodes,
             self.content_width,
             self.full_content_width,
         );
-        self.full_rendered_texts = result
-            .lines
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .to_lowercase()
-            })
-            .collect();
+
+        self.full_rendered_texts.clear();
+        self.full_rendered_texts_lower.clear();
+        self.full_rendered_texts.reserve(result.lines.len());
+        self.full_rendered_texts_lower.reserve(result.lines.len());
+
+        for line in result.lines {
+            let mut full = String::with_capacity(self.content_width as usize);
+            for span in &line.spans {
+                full.push_str(span.content.as_ref());
+            }
+            let lower = full.to_lowercase().nfc().collect::<String>();
+            self.full_rendered_texts.push(full);
+            self.full_rendered_texts_lower.push(lower);
+        }
         self.full_render_width = self.content_width;
     }
 
-    /// Check if a rendered line at `line_idx` contains the query (case-insensitive).
-    pub fn rendered_line_matches(&mut self, line_idx: usize, query_lower: &str) -> bool {
+    /// Check if a rendered line at `line_idx` contains the query.
+    pub fn rendered_line_matches(&mut self, line_idx: usize, query: &str, case_sensitive: bool) -> bool {
         self.ensure_full_rendered_texts();
-        self.full_rendered_texts
-            .get(line_idx)
-            .is_some_and(|text| text.contains(query_lower))
+        if case_sensitive {
+            self.full_rendered_texts
+                .get(line_idx)
+                .is_some_and(|text| text.contains(query))
+        } else {
+            self.full_rendered_texts_lower
+                .get(line_idx)
+                .is_some_and(|text| text.contains(query))
+        }
     }
 
     /// Get the lowercased rendered text for a line, for search highlighting.
     pub fn rendered_line_text_lower(&mut self, line_idx: usize) -> Option<&str> {
         self.ensure_full_rendered_texts();
-        self.full_rendered_texts.get(line_idx).map(|s| s.as_str())
+        self.full_rendered_texts_lower.get(line_idx).map(|s| s.as_str())
     }
 
     // ---------------------------------------------------------------------------
@@ -419,15 +504,7 @@ impl App {
     }
 
     fn ensure_toc_cursor_visible(&mut self) {
-        let h = self.toc_height as usize;
-        if h == 0 {
-            return;
-        }
-        if self.toc_cursor < self.toc_scroll {
-            self.toc_scroll = self.toc_cursor;
-        } else if self.toc_cursor >= self.toc_scroll + h {
-            self.toc_scroll = self.toc_cursor - h + 1;
-        }
+        clamp_scroll_to_cursor(self.toc_cursor, &mut self.toc_scroll, self.toc_height as usize);
     }
 
     fn sync_toc_to_scroll(&mut self) {
@@ -503,13 +580,32 @@ impl App {
         self.jump_to_search_current();
     }
 
+    /// Confirm dir search and return the selected file index (into dir_files).
+    pub fn dir_search_confirm(&mut self) -> Option<usize> {
+        self.flush_search();
+        self.mode = Mode::Normal;
+        if self.search_matches.is_empty() {
+            self.dir_search_active = false;
+            self.dir_search_cursor = 0;
+            return None;
+        }
+        self.dir_search_active = true;
+        self.dir_search_cursor = self.search_current;
+        let file_index = self.search_matches[self.search_current].line_idx;
+        self.dir_cursor = file_index;
+        Some(file_index)
+    }
+
     pub fn search_cancel(&mut self) {
         self.mode = Mode::Normal;
         self.search_query.clear();
         self.search_matches.clear();
+        self.search_current = 0;
         self.search_dirty = false;
         self.search_deadline = None;
         self.invalidate_search_cache();
+        self.dir_search_active = false;
+        self.dir_search_cursor = 0;
     }
 
     fn schedule_search(&mut self) {
@@ -537,31 +633,66 @@ impl App {
     }
 
     fn run_search(&mut self) {
+        use unicode_normalization::UnicodeNormalization;
+
         self.search_dirty = false;
         self.search_deadline = None;
+
+        if self.is_directory_mode() && self.dir_view == DirView::FileList {
+            self.run_dir_search();
+            return;
+        }
+
         if self.search_query.is_empty() {
             self.search_matches.clear();
             self.search_current = 0;
             return;
         }
+
         self.ensure_full_rendered_texts();
-        let q = self.search_query.to_lowercase();
+
+        // Smart Case: case-sensitive if query has uppercase
+        self.search_has_upper = self.search_query.chars().any(|c| c.is_uppercase());
+        self.search_query_norm = if self.search_has_upper {
+            self.search_query.nfc().collect()
+        } else {
+            self.search_query.to_lowercase().nfc().collect()
+        };
+
         let mut matches = Vec::new();
-        for (i, text) in self.full_rendered_texts.iter().enumerate() {
-            if text.contains(&q) {
-                matches.push(i);
+        let source = if self.search_has_upper {
+            &self.full_rendered_texts
+        } else {
+            &self.full_rendered_texts_lower
+        };
+
+        for (i, text) in source.iter().enumerate() {
+            let mut offset = 0;
+            while let Some(idx) = text[offset..].find(&self.search_query_norm) {
+                let abs_idx = offset + idx;
+                matches.push(SearchMatch {
+                    line_idx: i,
+                    start_byte: abs_idx,
+                    end_byte: abs_idx + self.search_query_norm.len(),
+                });
+                offset = abs_idx + self.search_query_norm.len().max(1);
             }
         }
+
         self.search_matches = matches;
         self.search_current = self
             .search_matches
             .iter()
-            .position(|&l| l >= self.scroll)
+            .position(|m| m.line_idx >= self.scroll)
             .unwrap_or(0);
         self.jump_to_search_current();
     }
 
     pub fn search_next(&mut self) {
+        if self.is_directory_mode() && self.dir_view == DirView::FileList && self.dir_search_active {
+            self.dir_search_next();
+            return;
+        }
         self.flush_search();
         if self.search_matches.is_empty() {
             return;
@@ -571,6 +702,10 @@ impl App {
     }
 
     pub fn search_prev(&mut self) {
+        if self.is_directory_mode() && self.dir_view == DirView::FileList && self.dir_search_active {
+            self.dir_search_prev();
+            return;
+        }
         self.flush_search();
         if self.search_matches.is_empty() {
             return;
@@ -584,9 +719,95 @@ impl App {
     }
 
     fn jump_to_search_current(&mut self) {
-        if let Some(&line) = self.search_matches.get(self.search_current) {
-            self.scroll_to(line);
+        if let Some(&m) = self.search_matches.get(self.search_current) {
+            // Center the match in the viewport
+            let center_offset = (self.content_height as usize / 2).saturating_sub(1);
+            let target_scroll = m.line_idx.saturating_sub(center_offset);
+            self.scroll_to(target_scroll);
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Directory search
+    // ---------------------------------------------------------------------------
+
+    pub fn start_dir_search(&mut self) {
+        self.start_search();
+        self.dir_search_active = false;
+        self.dir_search_cursor = 0;
+    }
+
+    fn run_dir_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_matches.clear();
+            self.search_current = 0;
+            self.dir_search_cursor = 0;
+            return;
+        }
+        let q = self.search_query.to_lowercase();
+        let mut matches = Vec::new();
+        for (i, entry) in self.dir_files.iter().enumerate() {
+            if entry.display_name.to_lowercase().contains(&q) {
+                matches.push(SearchMatch {
+                    line_idx: i,
+                    start_byte: 0,
+                    end_byte: 0,
+                });
+            }
+        }
+        self.search_matches = matches;
+        self.search_current = 0;
+        self.dir_search_cursor = 0;
+        self.dir_scroll = 0;
+        if let Some(first_match) = self.search_matches.first() {
+            self.dir_cursor = first_match.line_idx;
+        }
+    }
+
+    /// Navigate search_current within the filtered list while in search mode.
+    /// Updates dir_cursor so the TOC highlights the right entry. Returns true if changed.
+    pub fn dir_search_select(&mut self, delta: isize) -> bool {
+        if self.search_matches.is_empty() {
+            return false;
+        }
+        let len = self.search_matches.len() as isize;
+        let next = (self.search_current as isize + delta).rem_euclid(len) as usize;
+        if next == self.search_current {
+            return false;
+        }
+        self.search_current = next;
+        self.dir_cursor = self.search_matches[self.search_current].line_idx;
+        clamp_scroll_to_cursor(self.search_current, &mut self.dir_scroll, self.toc_height as usize);
+        true
+    }
+
+    pub fn dir_search_next(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        self.dir_search_cursor = (self.dir_search_cursor + 1) % self.search_matches.len();
+        self.dir_cursor = self.search_matches[self.dir_search_cursor].line_idx;
+        clamp_scroll_to_cursor(self.dir_search_cursor, &mut self.dir_scroll, self.toc_height as usize);
+    }
+
+    pub fn dir_search_prev(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        if self.dir_search_cursor == 0 {
+            self.dir_search_cursor = self.search_matches.len() - 1;
+        } else {
+            self.dir_search_cursor -= 1;
+        }
+        self.dir_cursor = self.search_matches[self.dir_search_cursor].line_idx;
+        clamp_scroll_to_cursor(self.dir_search_cursor, &mut self.dir_scroll, self.toc_height as usize);
+    }
+
+    /// After opening a file from dir search, apply the query as a content search.
+    pub fn search_resume(&mut self, query: &str) {
+        self.search_query = query.to_string();
+        self.invalidate_search_cache();
+        self.run_search();
     }
 
     pub fn get_cached_highlight(&self, line_idx: usize) -> Option<&Line<'static>> {
@@ -783,9 +1004,15 @@ impl App {
         if !self.directory_mode || self.dir_files.is_empty() {
             return;
         }
-        self.dir_cursor = self.dir_cursor.saturating_sub(1);
-        if self.dir_cursor < self.dir_scroll {
-            self.dir_scroll = self.dir_cursor;
+        if self.dir_search_active && !self.search_matches.is_empty() {
+            if self.dir_search_cursor > 0 {
+                self.dir_search_cursor -= 1;
+                self.dir_cursor = self.search_matches[self.dir_search_cursor].line_idx;
+                clamp_scroll_to_cursor(self.dir_search_cursor, &mut self.dir_scroll, self.toc_height as usize);
+            }
+        } else {
+            self.dir_cursor = self.dir_cursor.saturating_sub(1);
+            clamp_scroll_to_cursor(self.dir_cursor, &mut self.dir_scroll, self.toc_height as usize);
         }
     }
 
@@ -793,15 +1020,26 @@ impl App {
         if !self.directory_mode || self.dir_files.is_empty() {
             return;
         }
-        self.dir_cursor = (self.dir_cursor + 1).min(self.dir_files.len() - 1);
-        let visible = self.toc_height as usize;
-        if self.dir_cursor >= self.dir_scroll + visible {
-            self.dir_scroll = self.dir_cursor.saturating_sub(visible - 1);
+        if self.dir_search_active && !self.search_matches.is_empty() {
+            let max = self.search_matches.len() - 1;
+            if self.dir_search_cursor < max {
+                self.dir_search_cursor += 1;
+                self.dir_cursor = self.search_matches[self.dir_search_cursor].line_idx;
+                clamp_scroll_to_cursor(self.dir_search_cursor, &mut self.dir_scroll, self.toc_height as usize);
+            }
+        } else {
+            self.dir_cursor = (self.dir_cursor + 1).min(self.dir_files.len() - 1);
+            clamp_scroll_to_cursor(self.dir_cursor, &mut self.dir_scroll, self.toc_height as usize);
         }
     }
 
     pub fn dir_top(&mut self) {
-        self.dir_cursor = 0;
+        if self.dir_search_active && !self.search_matches.is_empty() {
+            self.dir_search_cursor = 0;
+            self.dir_cursor = self.search_matches[0].line_idx;
+        } else {
+            self.dir_cursor = 0;
+        }
         self.dir_scroll = 0;
     }
 
@@ -809,9 +1047,17 @@ impl App {
         if self.dir_files.is_empty() {
             return;
         }
-        self.dir_cursor = self.dir_files.len() - 1;
-        let visible = self.toc_height as usize;
-        self.dir_scroll = self.dir_cursor.saturating_sub(visible - 1);
+        if self.dir_search_active && !self.search_matches.is_empty() {
+            let last = self.search_matches.len() - 1;
+            self.dir_search_cursor = last;
+            self.dir_cursor = self.search_matches[last].line_idx;
+            let visible = self.toc_height as usize;
+            self.dir_scroll = last.saturating_sub(visible - 1);
+        } else {
+            self.dir_cursor = self.dir_files.len() - 1;
+            let visible = self.toc_height as usize;
+            self.dir_scroll = self.dir_cursor.saturating_sub(visible - 1);
+        }
     }
 
     pub fn open_file_from_dir(
@@ -844,31 +1090,12 @@ impl App {
             };
 
             let document = crate::parser::parse(&markdown);
-            let raw_lines: Vec<String> = markdown.lines().map(|l| l.to_string()).collect();
-            let node_heights = renderer::measure_nodes(&document.nodes, self.content_width);
-            let node_line_starts = renderer::compute_line_starts(&node_heights);
-            let total_content_lines = node_line_starts
-                .last()
-                .and_then(|&last| {
-                    node_heights.last().map(|&h| last + h)
-                })
-                .unwrap_or(0);
-            let toc_line_indices: Vec<usize> = document
-                .toc
-                .iter()
-                .map(|e| {
-                    node_line_starts
-                        .get(e.node_index)
-                        .copied()
-                        .unwrap_or(0)
-                })
-                .collect();
+            let result = measure_document(&document, self.content_width);
             self.document = Arc::new(document);
-            self.node_heights = node_heights;
-            self.node_line_starts = node_line_starts;
-            self.total_content_lines = total_content_lines;
-            self.raw_lines = raw_lines;
-            self.toc_line_indices = toc_line_indices.clone();
+            self.node_heights = result.node_heights;
+            self.node_line_starts = result.node_line_starts;
+            self.total_content_lines = result.total_content_lines;
+            self.toc_line_indices = result.toc_line_indices.clone();
 
             self.insert_file_cache(
                 file_index,
@@ -877,19 +1104,26 @@ impl App {
                     node_heights: self.node_heights.clone(),
                     node_line_starts: self.node_line_starts.clone(),
                     total_lines: self.total_content_lines,
-                    toc_line_indices,
+                    toc_line_indices: self.toc_line_indices.clone(),
                 },
             );
         }
 
         self.image_positions = vec![];
-        self.search_dirty = false;
-        self.search_deadline = None;
         self.mark_viewport_dirty();
 
         self.file_path = path;
         self.file_name = display_name;
         let _ = img_mgr;
+
+        // Apply directory search query as content search after opening
+        let dir_query = if self.dir_search_active {
+            Some(self.search_query.clone())
+        } else {
+            None
+        };
+        self.dir_search_active = false;
+        self.dir_search_cursor = 0;
 
         if let Some(&scroll) = self.scroll_positions.get(&file_index) {
             self.scroll = scroll.min(self.max_scroll());
@@ -902,6 +1136,13 @@ impl App {
         self.focus = Focus::Content;
         self.invalidate_search_cache();
         self.sync_toc_to_scroll();
+
+        if let Some(query) = dir_query {
+            if !query.is_empty() {
+                self.search_resume(&query);
+            }
+        }
+
         true
     }
 
@@ -918,6 +1159,11 @@ impl App {
         self.focus = Focus::Toc;
         self.toc_cursor = 0;
         self.toc_scroll = 0;
+        self.dir_search_active = false;
+        self.dir_search_cursor = 0;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.search_current = 0;
     }
 }
 
@@ -964,7 +1210,6 @@ mod tests {
         let mut app = App::new(
             PathBuf::from("doc.md"),
             document,
-            vec!["# A".to_string(), "".to_string(), "## B".to_string()],
             node_heights,
             node_line_starts,
             total_lines,

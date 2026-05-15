@@ -188,19 +188,22 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
                     let top_bar_width = w.saturating_sub(
                         display_width(BLOCKQUOTE_TOP_LEFT) + display_width(BLOCKQUOTE_TOP_RIGHT),
                     );
-                    let top_bar = BLOCKQUOTE_HORIZONTAL.repeat(top_bar_width);
-                    lines.push(Line::from(vec![Span::styled(
-                        format!("{}{}{}", BLOCKQUOTE_TOP_LEFT, top_bar, BLOCKQUOTE_TOP_RIGHT),
-                        border_style,
-                    )]));
+                    let mut top_line = String::with_capacity(w);
+                    top_line.push_str(BLOCKQUOTE_TOP_LEFT);
+                    for _ in 0..top_bar_width {
+                        top_line.push_str(BLOCKQUOTE_HORIZONTAL);
+                    }
+                    top_line.push_str(BLOCKQUOTE_TOP_RIGHT);
+                    lines.push(Line::from(Span::styled(top_line, border_style)));
                 }
 
-                for line in &nested.lines {
+                for line in nested.lines {
                     let content_width: usize =
                         line.spans.iter().map(|s| display_width(&s.content)).sum();
                     let padding = (inner_width as usize).saturating_sub(content_width);
-                    let mut quoted_spans = vec![Span::styled(BLOCKQUOTE_LEFT_BORDER, border_style)];
-                    quoted_spans.extend(line.spans.clone());
+                    let mut quoted_spans = Vec::with_capacity(line.spans.len() + 3);
+                    quoted_spans.push(Span::styled(BLOCKQUOTE_LEFT_BORDER, border_style));
+                    quoted_spans.extend(line.spans);
                     if padding > 0 {
                         quoted_spans.push(Span::styled(" ".repeat(padding), Style::default()));
                     }
@@ -208,23 +211,22 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
                     lines.push(Line::from(quoted_spans));
                 }
 
-                if !nested.lines.is_empty() {
+                if !start_idx.eq(&lines.len()) && start_idx + 1 < lines.len() {
                     let bot_bar_width = w.saturating_sub(
                         display_width(BLOCKQUOTE_BOTTOM_LEFT)
                             + display_width(BLOCKQUOTE_BOTTOM_RIGHT),
                     );
-                    let bot_bar = BLOCKQUOTE_HORIZONTAL.repeat(bot_bar_width);
-                    lines.push(Line::from(vec![Span::styled(
-                        format!(
-                            "{}{}{}",
-                            BLOCKQUOTE_BOTTOM_LEFT, bot_bar, BLOCKQUOTE_BOTTOM_RIGHT
-                        ),
-                        border_style,
-                    )]));
+                    let mut bot_line = String::with_capacity(w);
+                    bot_line.push_str(BLOCKQUOTE_BOTTOM_LEFT);
+                    for _ in 0..bot_bar_width {
+                        bot_line.push_str(BLOCKQUOTE_HORIZONTAL);
+                    }
+                    bot_line.push_str(BLOCKQUOTE_BOTTOM_RIGHT);
+                    lines.push(Line::from(Span::styled(bot_line, border_style)));
                 }
 
                 // Nested content starts after the top border (if present).
-                let content_offset = if !nested.lines.is_empty() { 1 } else { 0 };
+                let content_offset = if start_idx < lines.len() && !nested.image_positions.is_empty() { 1 } else { 0 };
                 image_positions.extend(
                     nested
                         .image_positions

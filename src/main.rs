@@ -33,7 +33,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{App, Focus, Mode};
+use app::{measure_document, App, Focus, Mode};
 use image_proto::ImageManager;
 
 enum AppEvent {
@@ -130,34 +130,16 @@ fn main() -> Result<()> {
             }
             let markdown = fs::read_to_string(path)
                 .with_context(|| format!("Cannot read '{}'", path.display()))?;
-            let raw_lines: Vec<String> = markdown.lines().map(|l| l.to_string()).collect();
             let document = parser::parse(&markdown);
-            let initial_width = 80u16;
-            let node_heights = renderer::measure_nodes(&document.nodes, initial_width);
-            let node_line_starts = renderer::compute_line_starts(&node_heights);
-            let total_content_lines = node_line_starts
-                .last()
-                .and_then(|&last| node_heights.last().map(|&h| last + h))
-                .unwrap_or(0);
-            let toc_line_indices = document
-                .toc
-                .iter()
-                .map(|entry| {
-                    node_line_starts
-                        .get(entry.node_index)
-                        .copied()
-                        .unwrap_or(0)
-                })
-                .collect();
+            let result = measure_document(&document, 80u16);
             App::new(
                 path.clone(),
                 document,
-                raw_lines,
-                node_heights,
-                node_line_starts,
-                total_content_lines,
+                result.node_heights,
+                result.node_line_starts,
+                result.total_content_lines,
                 vec![],
-                toc_line_indices,
+                result.toc_line_indices,
             )
         }
     } else {
@@ -214,49 +196,40 @@ fn run(
     img_mgr: &mut ImageManager,
     rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
-    let mut last_render_width = 0u16;
     let mut needs_redraw = true;
     let mut resize_deadline: Option<Instant> = None;
+
+    // Initial layout (only re-run on resize events)
+    {
+        let size = terminal.size()?;
+        ui::calculate_layout(
+            app,
+            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+        );
+    }
+    let mut last_render_width = app.content_width;
 
     loop {
         if let Some(deadline) = resize_deadline {
             if Instant::now() >= deadline {
                 resize_deadline = None;
+                let size = terminal.size()?;
+                ui::calculate_layout(
+                    app,
+                    ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                );
+                let cw = app.content_width;
+                if cw > 0 && cw != last_render_width {
+                    app.remeasure(cw);
+                    last_render_width = cw;
+                    app.mark_viewport_dirty();
+                }
                 needs_redraw = true;
             }
         }
 
-        let size = terminal.size()?;
-        ui::update_layout(
-            app,
-            ratatui::layout::Rect::new(0, 0, size.width, size.height),
-        );
         let cw = app.content_width;
         let fw = app.full_content_width;
-        if cw > 0 && cw != last_render_width {
-            // Width changed: re-measure (cheap) and mark viewport dirty
-            app.node_heights = renderer::measure_nodes(&app.document.nodes, cw);
-            app.node_line_starts = renderer::compute_line_starts(&app.node_heights);
-            app.total_content_lines = app
-                .node_line_starts
-                .last()
-                .and_then(|&last| app.node_heights.last().map(|&h| last + h))
-                .unwrap_or(0);
-            app.toc_line_indices = app
-                .document
-                .toc
-                .iter()
-                .map(|entry| {
-                    app.node_line_starts
-                        .get(entry.node_index)
-                        .copied()
-                        .unwrap_or(0)
-                })
-                .collect();
-            last_render_width = cw;
-            app.mark_viewport_dirty();
-            needs_redraw = true;
-        }
 
         if app.ensure_viewport_rendered(cw, fw) {
             needs_redraw = true;
@@ -428,6 +401,20 @@ fn handle_normal_key(
                     let base_dir = app.dir_base.clone();
                     return app.open_file_from_dir(cursor, &base_dir, img_mgr);
                 }
+                c if keys.search.matches(c, modifiers) => {
+                    app.start_dir_search();
+                    return true;
+                }
+                c if keys.search_next.matches(c, modifiers) => {
+                    let before = (app.search_current, app.dir_cursor);
+                    app.dir_search_next();
+                    return before != (app.search_current, app.dir_cursor);
+                }
+                c if keys.search_prev.matches(c, modifiers) => {
+                    let before = (app.search_current, app.dir_cursor);
+                    app.dir_search_prev();
+                    return before != (app.search_current, app.dir_cursor);
+                }
                 _ => return false,
             },
             crate::app::DirView::FileView => match code {
@@ -587,8 +574,24 @@ fn handle_search_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -> 
             true
         }
         KeyCode::Enter => {
-            app.search_confirm();
+            // In directory mode FileList, Enter confirms the search filter
+            // (vim-style: user then navigates with j/k/n/N and opens with Enter)
+            if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
+                app.dir_search_confirm();
+            } else {
+                app.search_confirm();
+            }
             true
+        }
+        KeyCode::Up if app.is_directory_mode()
+            && app.dir_view == crate::app::DirView::FileList =>
+        {
+            app.dir_search_select(-1)
+        }
+        KeyCode::Down if app.is_directory_mode()
+            && app.dir_view == crate::app::DirView::FileList =>
+        {
+            app.dir_search_select(1)
         }
         KeyCode::Backspace => {
             app.search_pop();

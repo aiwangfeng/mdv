@@ -3,6 +3,7 @@
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
+    style::Style,
     text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
@@ -24,42 +25,16 @@ fn get_content_margin() -> u16 {
     config::get().content_margin
 }
 
-pub fn update_layout(app: &mut App, area: Rect) {
-    let content_margin = get_content_margin();
-    let [main_area, _status_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-
-    let show_toc = app.show_toc && (app.toc_len() > 0 || app.is_directory_mode());
-    let (_, content_area) = if show_toc {
-        let toc_pct = app.toc_width_pct.min(50);
-        let [left, right] = Layout::horizontal([
-            Constraint::Percentage(toc_pct),
-            Constraint::Percentage(100 - toc_pct),
-        ])
-        .areas(main_area);
-        app.toc_height = left.height.saturating_sub(2);
-        (Some(left), right)
-    } else {
-        app.toc_height = 0;
-        (None, main_area)
-    };
-
-    app.content_height = content_area.height.saturating_sub(2);
-    app.content_width = content_area
-        .width
-        .saturating_sub(2)
-        .saturating_sub(content_margin);
-    app.full_content_width = app.content_width;
+pub struct LayoutResult {
+    pub toc_area: Option<Rect>,
+    pub content_area: Rect,
+    pub status_area: Rect,
 }
 
-pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
-    let area = frame.area();
-
-    // ── Overall vertical split: content area + status bar ──────────────────
+pub fn calculate_layout(app: &mut App, area: Rect) -> LayoutResult {
     let [main_area, status_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
-    // ── Horizontal split: TOC (optional) | Content ─────────────────────────
     let show_toc = app.show_toc && (app.toc_len() > 0 || app.is_directory_mode());
     let (toc_area, content_area) = if show_toc {
         let toc_pct = app.toc_width_pct.min(50);
@@ -68,19 +43,38 @@ pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
             Constraint::Percentage(100 - toc_pct),
         ])
         .areas(main_area);
+        app.toc_height = l.height.saturating_sub(2);
         (Some(l), r)
     } else {
+        app.toc_height = 0;
         (None, main_area)
     };
 
-    update_layout(app, area);
+    let content_margin = get_content_margin();
+    app.content_height = content_area.height.saturating_sub(2);
+    app.content_width = content_area
+        .width
+        .saturating_sub(2)
+        .saturating_sub(content_margin);
+    app.full_content_width = app.content_width;
+
+    LayoutResult {
+        toc_area,
+        content_area,
+        status_area,
+    }
+}
+
+pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
+    let area = frame.area();
+    let layout = calculate_layout(app, area);
 
     // ── Draw panels ─────────────────────────────────────────────────────────
-    if let Some(ta) = toc_area {
+    if let Some(ta) = layout.toc_area {
         draw_toc(frame, app, ta);
     }
-    draw_content(frame, app, img_mgr, content_area);
-    draw_status_bar(frame, app, status_area);
+    draw_content(frame, app, img_mgr, layout.content_area);
+    draw_status_bar(frame, app, layout.status_area);
 
     // ── Overlays ────────────────────────────────────────────────────────────
     match app.mode {
@@ -105,6 +99,44 @@ pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
 // TOC panel
 // ---------------------------------------------------------------------------
 
+// Highlight matching substring in a file name for directory search.
+fn highlight_file_name(
+    indent: &str,
+    name: &str,
+    query_lower: &str,
+    base_style: Style,
+) -> Vec<Span<'static>> {
+    let name_lower = name.to_lowercase();
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(indent.to_string(), base_style)];
+    let mut rest = name;
+    let mut rest_lower = name_lower.as_str();
+
+    while !rest_lower.is_empty() {
+        if let Some(idx) = rest_lower.find(query_lower) {
+            if idx > 0 {
+                spans.push(Span::styled(
+                    rest[..idx].to_string(),
+                    base_style,
+                ));
+            }
+            spans.push(Span::styled(
+                rest[idx..idx + query_lower.len()].to_string(),
+                Theme::search_match(),
+            ));
+            rest = &rest[idx + query_lower.len()..];
+            rest_lower = &rest_lower[idx + query_lower.len()..];
+        } else {
+            spans.push(Span::styled(rest.to_string(), base_style));
+            break;
+        }
+    }
+    spans
+}
+
+// ---------------------------------------------------------------------------
+// TOC panel
+// ---------------------------------------------------------------------------
+
 fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Toc;
     let border_style = if focused {
@@ -116,26 +148,50 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
 
     let (title, visible_items): (String, Vec<ListItem>) =
         if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
-            // File list mode
-            let title = format!(" {} files ", "📁");
+            // File list mode (with optional search filter)
+            let filtered = (app.dir_search_active || app.mode == crate::app::Mode::Search)
+                && !app.search_matches.is_empty();
+            let total = if filtered {
+                app.search_matches.len()
+            } else {
+                app.dir_files.len()
+            };
+            let title = if filtered {
+                format!(
+                    " {} files (/{}) ",
+                    "\u{1f4c1}",
+                    app.search_query
+                )
+            } else {
+                format!(" {} files ", "\u{1f4c1}")
+            };
             let visible_start = app.dir_scroll;
-            let visible_end =
-                (visible_start + area.height.saturating_sub(2) as usize).min(app.dir_files.len());
-            let items: Vec<ListItem> = app
-                .dir_files
-                .iter()
-                .enumerate()
-                .skip(visible_start)
-                .take(visible_end.saturating_sub(visible_start))
-                .map(|(i, entry)| {
+            let visible_end = (visible_start + area.height.saturating_sub(2) as usize).min(total);
+            let query_lower = app.search_query.to_lowercase();
+            let items: Vec<ListItem> = (visible_start..visible_end)
+                .map(|pos| {
+                    let file_idx = if filtered {
+                        app.search_matches[pos].line_idx
+                    } else {
+                        pos
+                    };
+                    let entry = &app.dir_files[file_idx];
                     let indent = "  ".repeat(entry.depth);
-                    let text = format!("{}{}", indent, entry.display_name);
-                    let style = if i == app.dir_cursor && focused {
+                    let base_style = if file_idx == app.dir_cursor && focused {
                         Theme::toc_selected()
                     } else {
                         Theme::text()
                     };
-                    ListItem::new(Line::from(Span::styled(text, style)))
+                    // Highlight matching substring in file name when filter is active
+                    let spans = if filtered && !query_lower.is_empty() {
+                        highlight_file_name(&indent, &entry.display_name, &query_lower, base_style)
+                    } else {
+                        vec![Span::styled(
+                            format!("{}{}", indent, entry.display_name),
+                            base_style,
+                        )]
+                    };
+                    ListItem::new(Line::from(spans))
                 })
                 .collect();
             (title, items)
@@ -184,7 +240,11 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
 
     let (cursor, scroll) =
         if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
-            (app.dir_cursor, app.dir_scroll)
+            if app.dir_search_active && !app.search_matches.is_empty() {
+                (app.dir_search_cursor, app.dir_scroll)
+            } else {
+                (app.dir_cursor, app.dir_scroll)
+            }
         } else {
             (app.toc_cursor, app.toc_scroll)
         };
@@ -284,7 +344,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
     let scroll = app.scroll;
     let height = inner_with_margin.height as usize;
 
-    let current_match_line = if app.search_matches.is_empty() {
+    let current_match = if app.search_matches.is_empty() {
         None
     } else {
         Some(app.search_matches[app.search_current])
@@ -317,25 +377,25 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
             vec![]
         };
         let mut result = Vec::with_capacity(height);
-        let query = app.search_query.clone();
-        let q = query.to_lowercase();
+        let q = app.search_query_norm.clone();
+        let has_upper = app.search_has_upper;
+
         for (i, line) in visible_slice.into_iter().enumerate() {
             let line_idx = scroll + i;
             if let Some(cached) = app.get_cached_highlight(line_idx) {
                 result.push(cached.clone());
                 continue;
             }
-            let line_matches = app.rendered_line_matches(line_idx, &q);
-            let is_current = line_idx == current_match_line.unwrap_or(usize::MAX);
-            if line_matches && is_current {
+            let line_matches = app.rendered_line_matches(line_idx, &q, has_upper);
+            if line_matches {
                 let lower_text = app
                     .rendered_line_text_lower(line_idx)
                     .map(|s| s.to_string())
                     .unwrap_or_default();
                 let highlighted = apply_search_highlight(
                     vec![line],
-                    &query,
-                    current_match_line,
+                    &app.search_query,
+                    current_match,
                     line_idx,
                     Some(&[lower_text.as_str()]),
                 );
