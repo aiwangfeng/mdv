@@ -38,7 +38,7 @@ pub(super) fn measure_node_height(node: &DocNode, width: u16) -> usize {
             let left_border = display_width(super::CODE_BLOCK_LEFT_BORDER);
             let right_border = display_width(super::CODE_BLOCK_RIGHT_BORDER);
             let max_content_width = w.saturating_sub(left_border + right_border);
-            
+
             let mut line_count: usize = 0;
             for line in code.split('\n') {
                 // If it's the last empty split (due to trailing newline), skip if code ended with \n
@@ -59,7 +59,7 @@ pub(super) fn measure_node_height(node: &DocNode, width: u16) -> usize {
             if code.is_empty() {
                 line_count = 0;
             }
-            
+
             line_count + 2
         }
         DocNode::BlockQuote(children) => {

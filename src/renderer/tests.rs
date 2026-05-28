@@ -525,10 +525,11 @@ No language block
     for width in (10..=120).step_by(5) {
         for (i, node) in doc.nodes.iter().enumerate() {
             let measured = super::measure::measure_node_height(node, width as u16);
-            let rendered = render_nodes(std::slice::from_ref(node), width as u16, width as u16).lines.len();
+            let rendered = render_nodes(std::slice::from_ref(node), width as u16, width as u16)
+                .lines
+                .len();
             assert_eq!(
-                measured,
-                rendered,
+                measured, rendered,
                 "Width {}: Node at index {} ({:?}) has mismatched height: measured={}, rendered={}",
                 width, i, node, measured, rendered
             );
@@ -539,7 +540,14 @@ No language block
 #[test]
 fn test_heading_height_mismatch_fuzz() {
     config::load().unwrap();
-    let words = vec!["word", "longerword", "verylongwordthatmightwrapitself", "a", "b", "c"];
+    let words = vec![
+        "word",
+        "longerword",
+        "verylongwordthatmightwrapitself",
+        "a",
+        "b",
+        "c",
+    ];
     for level in 1..=6 {
         for num_words in 1..20 {
             let mut text = String::new();
@@ -549,10 +557,16 @@ fn test_heading_height_mismatch_fuzz() {
                 }
                 text.push_str(words[j % words.len()]);
             }
-            let node = DocNode::Heading { level, text: text.clone() };
+            let node = DocNode::Heading {
+                level,
+                text: text.clone(),
+            };
             for width in 5..=150 {
                 let measured = super::measure::measure_node_height(&node, width as u16);
-                let rendered = render_nodes(std::slice::from_ref(&node), width as u16, width as u16).lines.len();
+                let rendered =
+                    render_nodes(std::slice::from_ref(&node), width as u16, width as u16)
+                        .lines
+                        .len();
                 assert_eq!(
                     measured,
                     rendered,
@@ -616,8 +630,7 @@ No language block
         let computed_starts = super::measure::compute_line_starts(&node_heights);
         let rendered = render_nodes(&doc.nodes, width as u16, width as u16);
         assert_eq!(
-            computed_starts,
-            rendered.node_line_starts,
+            computed_starts, rendered.node_line_starts,
             "Width {}: cumulative line starts mismatched",
             width
         );
@@ -630,6 +643,3 @@ No language block
         );
     }
 }
-
-
-

@@ -98,36 +98,65 @@ pub fn draw(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager) {
 // ---------------------------------------------------------------------------
 
 // Highlight matching substring in a file name for directory search.
+// Uses char-level matching to avoid unicode byte-offset mismatches.
 fn highlight_file_name(
     indent: &str,
     name: &str,
     query_lower: &str,
     base_style: Style,
 ) -> Vec<Span<'static>> {
-    let name_lower = name.to_lowercase();
     let mut spans: Vec<Span<'static>> = vec![Span::styled(indent.to_string(), base_style)];
-    let mut rest = name;
-    let mut rest_lower = name_lower.as_str();
+    let query_chars: Vec<char> = query_lower.chars().collect();
+    if query_chars.is_empty() {
+        spans.push(Span::styled(name.to_string(), base_style));
+        return spans;
+    }
 
-    while !rest_lower.is_empty() {
-        if let Some(idx) = rest_lower.find(query_lower) {
-            if idx > 0 {
-                spans.push(Span::styled(
-                    rest[..idx].to_string(),
-                    base_style,
-                ));
-            }
-            spans.push(Span::styled(
-                rest[idx..idx + query_lower.len()].to_string(),
-                Theme::search_match(),
-            ));
-            rest = &rest[idx + query_lower.len()..];
-            rest_lower = &rest_lower[idx + query_lower.len()..];
+    let name_chars: Vec<char> = name.chars().collect();
+    let name_lower_chars: Vec<char> = name.to_lowercase().chars().collect();
+
+    // Find all match ranges in char-index space
+    let mut char_matches: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i + query_chars.len() <= name_lower_chars.len() {
+        if name_lower_chars[i..i + query_chars.len()] == query_chars[..] {
+            char_matches.push((i, i + query_chars.len()));
+            i += query_chars.len();
         } else {
-            spans.push(Span::styled(rest.to_string(), base_style));
-            break;
+            i += 1;
         }
     }
+
+    // Build a char-index → byte-offset table for the original name
+    let mut char_to_byte = Vec::with_capacity(name_chars.len() + 1);
+    let mut byte_pos = 0;
+    char_to_byte.push(byte_pos);
+    for ch in &name_chars {
+        byte_pos += ch.len_utf8();
+        char_to_byte.push(byte_pos);
+    }
+
+    // Emit spans: unmatched (base_style) then matched (search_match)
+    let mut last_byte = 0;
+    for (start_char, end_char) in &char_matches {
+        let start_byte = char_to_byte[*start_char];
+        let end_byte = char_to_byte[*end_char];
+        if start_byte > last_byte {
+            spans.push(Span::styled(
+                name[last_byte..start_byte].to_string(),
+                base_style,
+            ));
+        }
+        spans.push(Span::styled(
+            name[start_byte..end_byte].to_string(),
+            Theme::search_match(),
+        ));
+        last_byte = end_byte;
+    }
+    if last_byte < name.len() {
+        spans.push(Span::styled(name[last_byte..].to_string(), base_style));
+    }
+
     spans
 }
 
@@ -155,11 +184,7 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                 app.dir_files.len()
             };
             let title = if filtered {
-                format!(
-                    " {} files (/{}) ",
-                    "\u{1f4c1}",
-                    app.search_query
-                )
+                format!(" {} files (/{}) ", "\u{1f4c1}", app.search_query)
             } else {
                 format!(" {} files ", "\u{1f4c1}")
             };
@@ -349,10 +374,14 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
     };
 
     fn borrow_line<'a>(line: &'a Line<'static>) -> Line<'a> {
-        let spans = line.spans.iter().map(|s| Span {
-            content: std::borrow::Cow::Borrowed(s.content.as_ref()),
-            style: s.style,
-        }).collect::<Vec<_>>();
+        let spans = line
+            .spans
+            .iter()
+            .map(|s| Span {
+                content: std::borrow::Cow::Borrowed(s.content.as_ref()),
+                style: s.style,
+            })
+            .collect::<Vec<_>>();
         let mut l = Line::from(spans);
         l.alignment = line.alignment;
         l.style = line.style;
@@ -410,6 +439,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
                     current_match,
                     line_idx,
                     Some(&[lower_text.as_str()]),
+                    0,
                 );
                 if let Some(hl_line) = highlighted.into_iter().next() {
                     let hl = hl_line.clone();

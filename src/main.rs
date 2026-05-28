@@ -583,13 +583,11 @@ fn handle_search_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -> 
             }
             true
         }
-        KeyCode::Up if app.is_directory_mode()
-            && app.dir_view == crate::app::DirView::FileList =>
-        {
+        KeyCode::Up if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList => {
             app.dir_search_select(-1)
         }
-        KeyCode::Down if app.is_directory_mode()
-            && app.dir_view == crate::app::DirView::FileList =>
+        KeyCode::Down
+            if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList =>
         {
             app.dir_search_select(1)
         }

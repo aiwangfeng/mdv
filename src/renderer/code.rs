@@ -24,9 +24,15 @@ use std::sync::OnceLock;
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::cell::RefCell;
+use std::rc::Rc;
+
+type HighlightEntry = (SyntectStyle, String);
+type HighlightRegions = Vec<HighlightEntry>;
+type CachedHighlightRegions = Rc<HighlightRegions>;
+type CacheKey = (String, u64);
 
 thread_local! {
     static HL_CACHE: RefCell<HighlightCache> = RefCell::new(HighlightCache::default());
@@ -34,8 +40,8 @@ thread_local! {
 
 #[derive(Default)]
 struct HighlightCache {
-    map: std::collections::HashMap<(String, u64), Vec<(SyntectStyle, String)>>,
-    order: std::collections::VecDeque<(String, u64)>,
+    map: std::collections::HashMap<CacheKey, CachedHighlightRegions>,
+    order: std::collections::VecDeque<CacheKey>,
 }
 
 fn get_syntax_set() -> &'static SyntaxSet {
@@ -46,13 +52,11 @@ fn get_theme_set() -> &'static ThemeSet {
     THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
-fn get_cached_regions(cache_key: &(String, u64)) -> Option<Vec<(SyntectStyle, String)>> {
-    HL_CACHE.with(|cache| {
-        cache.borrow().map.get(cache_key).cloned()
-    })
+fn get_cached_regions(cache_key: &CacheKey) -> Option<CachedHighlightRegions> {
+    HL_CACHE.with(|cache| cache.borrow().map.get(cache_key).cloned())
 }
 
-fn cache_regions(cache_key: (String, u64), regions: Vec<(SyntectStyle, String)>) {
+fn cache_regions(cache_key: CacheKey, regions: CachedHighlightRegions) {
     HL_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if !cache.map.contains_key(&cache_key) {
@@ -95,7 +99,7 @@ pub(super) fn render_code_block(
     let cache_key = (lang_label.to_string(), hasher.finish());
     let cached_regions = get_cached_regions(&cache_key);
 
-    let regions_to_render: Vec<(SyntectStyle, String)> = if let Some(cached) = cached_regions {
+    let regions_to_render: CachedHighlightRegions = if let Some(cached) = cached_regions {
         cached
     } else {
         let ss = get_syntax_set();
@@ -121,20 +125,25 @@ pub(super) fn render_code_block(
             }
         }
 
-        cache_regions(cache_key, all_regions.clone());
-        all_regions
+        let rc = Rc::new(all_regions);
+        cache_regions(cache_key, Rc::clone(&rc));
+        rc
     };
 
     let mut current_line_spans: Vec<Span<'static>> =
         vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
     let mut current_line_content_width: usize = 0;
     let max_content_width = width.saturating_sub(
-        display_width(CODE_BLOCK_LEFT_BORDER) + display_width(CODE_BLOCK_RIGHT_BORDER)
+        display_width(CODE_BLOCK_LEFT_BORDER) + display_width(CODE_BLOCK_RIGHT_BORDER),
     );
 
-    for (style, text) in regions_to_render {
+    for (style, text) in regions_to_render.iter() {
         let is_newline = text.ends_with('\n');
-        let text = if is_newline { text.trim_end_matches('\n') } else { &text };
+        let text = if is_newline {
+            text.trim_end_matches('\n')
+        } else {
+            text
+        };
 
         if !text.is_empty() {
             let fg = syntect_color_to_ratatui(style.foreground);
@@ -156,28 +165,29 @@ pub(super) fn render_code_block(
 
             for c in text.chars() {
                 let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-                
+
                 if current_line_content_width + c_width > max_content_width {
                     if !current_chunk.is_empty() {
                         current_line_spans.push(Span::styled(current_chunk.clone(), s));
                         current_chunk.clear();
                     }
-                    
+
                     let padding = max_content_width.saturating_sub(current_line_content_width);
                     if padding > 0 {
-                        current_line_spans.push(Span::styled(" ".repeat(padding), Style::default()));
+                        current_line_spans
+                            .push(Span::styled(" ".repeat(padding), Style::default()));
                     }
                     current_line_spans.push(Span::styled(CODE_BLOCK_RIGHT_BORDER, border_style));
                     lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-                    
+
                     current_line_spans = vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
                     current_line_content_width = 0;
                 }
-                
+
                 current_chunk.push(c);
                 current_line_content_width += c_width;
             }
-            
+
             if !current_chunk.is_empty() {
                 current_line_spans.push(Span::styled(current_chunk, s));
             }
@@ -190,7 +200,7 @@ pub(super) fn render_code_block(
             }
             current_line_spans.push(Span::styled(CODE_BLOCK_RIGHT_BORDER, border_style));
             lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-            
+
             current_line_spans = vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
             current_line_content_width = 0;
         }

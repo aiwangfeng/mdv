@@ -92,10 +92,7 @@ pub(crate) struct MeasureResult {
     pub(crate) toc_line_indices: Vec<usize>,
 }
 
-pub(crate) fn measure_document(
-    document: &crate::parser::Document,
-    width: u16,
-) -> MeasureResult {
+pub(crate) fn measure_document(document: &crate::parser::Document, width: u16) -> MeasureResult {
     let node_heights = crate::renderer::measure_nodes(&document.nodes, width);
     let node_line_starts = crate::renderer::compute_line_starts(&node_heights);
     let total_content_lines = node_line_starts
@@ -105,12 +102,7 @@ pub(crate) fn measure_document(
     let toc_line_indices = document
         .toc
         .iter()
-        .map(|entry| {
-            node_line_starts
-                .get(entry.node_index)
-                .copied()
-                .unwrap_or(0)
-        })
+        .map(|entry| node_line_starts.get(entry.node_index).copied().unwrap_or(0))
         .collect();
     MeasureResult {
         node_heights,
@@ -194,25 +186,28 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
         file_path: PathBuf,
-        document: Document,
+        file_name: String,
+        document: Arc<Document>,
         node_heights: Vec<usize>,
         node_line_starts: Vec<usize>,
         total_content_lines: usize,
         image_positions: Vec<(usize, String, String)>,
         toc_line_indices: Vec<usize>,
+        directory_mode: bool,
+        dir_view: DirView,
+        dir_files: Vec<crate::dir::DirEntry>,
+        dir_base: PathBuf,
+        focus: Focus,
+        first_run: bool,
     ) -> Self {
-        let file_name = file_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "mdv".to_string());
-
         let cfg = config::get();
         Self {
             file_path,
             file_name,
-            document: Arc::new(document),
+            document,
             node_heights,
             node_line_starts,
             total_content_lines,
@@ -229,7 +224,7 @@ impl App {
             full_content_width: 0,
             toc_width_pct: cfg.toc_width_pct,
             show_toc: true,
-            focus: Focus::Content,
+            focus,
             scroll: 0,
             toc_cursor: 0,
             toc_scroll: 0,
@@ -248,71 +243,10 @@ impl App {
             theme_picker_index: 0,
             theme_picker_origin: None,
             toast: None,
-            first_run: true,
+            first_run,
             quit: false,
-            directory_mode: false,
-            dir_view: DirView::FileView,
-            dir_files: vec![],
-            dir_base: PathBuf::new(),
-            dir_cursor: 0,
-            dir_scroll: 0,
-            current_file_index: None,
-            file_cache: HashMap::new(),
-            file_cache_order: VecDeque::new(),
-            scroll_positions: HashMap::new(),
-            dir_search_active: false,
-            dir_search_cursor: 0,
-        }
-    }
-
-    pub fn new_directory_mode(dir_base: PathBuf, dir_files: Vec<crate::dir::DirEntry>) -> Self {
-        let cfg = config::get();
-        Self {
-            file_path: PathBuf::new(),
-            file_name: dir_base
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "mdv".to_string()),
-            document: Arc::new(Document::default()),
-            node_heights: vec![],
-            node_line_starts: vec![],
-            total_content_lines: 0,
-            image_positions: vec![],
-            toc_line_indices: vec![],
-            viewport_scroll: 0,
-            viewport_lines: Vec::new(),
-            viewport_dirty: true,
-            full_rendered_texts: Vec::new(),
-            full_rendered_texts_lower: Vec::new(),
-            full_render_width: 0,
-            toc_width_pct: cfg.toc_width_pct,
-            show_toc: true,
-            focus: Focus::Toc,
-            scroll: 0,
-            content_height: 0,
-            content_width: 0,
-            full_content_width: 0,
-            toc_cursor: 0,
-            toc_scroll: 0,
-            toc_height: 0,
-            mode: Mode::Normal,
-            search_query: String::new(),
-            search_matches: vec![],
-            search_current: 0,
-            search_highlight_cache: HashMap::new(),
-            search_highlight_order: VecDeque::new(),
-            cached_search_query: None,
-            search_dirty: false,
-            search_deadline: None,
-            search_query_norm: String::new(),
-            search_has_upper: false,
-            theme_picker_index: 0,
-            theme_picker_origin: None,
-            toast: None,
-            first_run: false,
-            quit: false,
-            directory_mode: true,
-            dir_view: DirView::FileList,
+            directory_mode,
+            dir_view,
             dir_files,
             dir_base,
             dir_cursor: 0,
@@ -326,10 +260,68 @@ impl App {
         }
     }
 
+    pub fn new(
+        file_path: PathBuf,
+        document: Document,
+        node_heights: Vec<usize>,
+        node_line_starts: Vec<usize>,
+        total_content_lines: usize,
+        image_positions: Vec<(usize, String, String)>,
+        toc_line_indices: Vec<usize>,
+    ) -> Self {
+        let file_name = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "mdv".to_string());
+
+        Self::new_inner(
+            file_path,
+            file_name,
+            Arc::new(document),
+            node_heights,
+            node_line_starts,
+            total_content_lines,
+            image_positions,
+            toc_line_indices,
+            false,
+            DirView::FileView,
+            vec![],
+            PathBuf::new(),
+            Focus::Content,
+            true,
+        )
+    }
+
+    pub fn new_directory_mode(dir_base: PathBuf, dir_files: Vec<crate::dir::DirEntry>) -> Self {
+        let file_name = dir_base
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "mdv".to_string());
+
+        Self::new_inner(
+            PathBuf::new(),
+            file_name,
+            Arc::new(Document::default()),
+            vec![],
+            vec![],
+            0,
+            vec![],
+            vec![],
+            true,
+            DirView::FileList,
+            dir_files,
+            dir_base,
+            Focus::Toc,
+            false,
+        )
+    }
+
     /// Ensure the viewport around the current scroll position is rendered and cached.
     /// Returns true if the viewport was re-rendered.
     pub fn ensure_viewport_rendered(&mut self, width: u16, full_width: u16) -> bool {
-        if !self.viewport_dirty && self.viewport_scroll == self.scroll && !self.viewport_lines.is_empty()
+        if !self.viewport_dirty
+            && self.viewport_scroll == self.scroll
+            && !self.viewport_lines.is_empty()
         {
             return false;
         }
@@ -407,7 +399,12 @@ impl App {
     }
 
     /// Check if a rendered line at `line_idx` contains the query.
-    pub fn rendered_line_matches(&mut self, line_idx: usize, query: &str, case_sensitive: bool) -> bool {
+    pub fn rendered_line_matches(
+        &mut self,
+        line_idx: usize,
+        query: &str,
+        case_sensitive: bool,
+    ) -> bool {
         self.ensure_full_rendered_texts();
         if case_sensitive {
             self.full_rendered_texts
@@ -423,7 +420,9 @@ impl App {
     /// Get the lowercased rendered text for a line, for search highlighting.
     pub fn rendered_line_text_lower(&mut self, line_idx: usize) -> Option<&str> {
         self.ensure_full_rendered_texts();
-        self.full_rendered_texts_lower.get(line_idx).map(|s| s.as_str())
+        self.full_rendered_texts_lower
+            .get(line_idx)
+            .map(|s| s.as_str())
     }
 
     // ---------------------------------------------------------------------------
@@ -504,7 +503,11 @@ impl App {
     }
 
     fn ensure_toc_cursor_visible(&mut self) {
-        clamp_scroll_to_cursor(self.toc_cursor, &mut self.toc_scroll, self.toc_height as usize);
+        clamp_scroll_to_cursor(
+            self.toc_cursor,
+            &mut self.toc_scroll,
+            self.toc_height as usize,
+        );
     }
 
     fn sync_toc_to_scroll(&mut self) {
@@ -689,7 +692,8 @@ impl App {
     }
 
     pub fn search_next(&mut self) {
-        if self.is_directory_mode() && self.dir_view == DirView::FileList && self.dir_search_active {
+        if self.is_directory_mode() && self.dir_view == DirView::FileList && self.dir_search_active
+        {
             self.dir_search_next();
             return;
         }
@@ -702,7 +706,8 @@ impl App {
     }
 
     pub fn search_prev(&mut self) {
-        if self.is_directory_mode() && self.dir_view == DirView::FileList && self.dir_search_active {
+        if self.is_directory_mode() && self.dir_view == DirView::FileList && self.dir_search_active
+        {
             self.dir_search_prev();
             return;
         }
@@ -777,7 +782,11 @@ impl App {
         }
         self.search_current = next;
         self.dir_cursor = self.search_matches[self.search_current].line_idx;
-        clamp_scroll_to_cursor(self.search_current, &mut self.dir_scroll, self.toc_height as usize);
+        clamp_scroll_to_cursor(
+            self.search_current,
+            &mut self.dir_scroll,
+            self.toc_height as usize,
+        );
         true
     }
 
@@ -787,7 +796,11 @@ impl App {
         }
         self.dir_search_cursor = (self.dir_search_cursor + 1) % self.search_matches.len();
         self.dir_cursor = self.search_matches[self.dir_search_cursor].line_idx;
-        clamp_scroll_to_cursor(self.dir_search_cursor, &mut self.dir_scroll, self.toc_height as usize);
+        clamp_scroll_to_cursor(
+            self.dir_search_cursor,
+            &mut self.dir_scroll,
+            self.toc_height as usize,
+        );
     }
 
     pub fn dir_search_prev(&mut self) {
@@ -800,7 +813,11 @@ impl App {
             self.dir_search_cursor -= 1;
         }
         self.dir_cursor = self.search_matches[self.dir_search_cursor].line_idx;
-        clamp_scroll_to_cursor(self.dir_search_cursor, &mut self.dir_scroll, self.toc_height as usize);
+        clamp_scroll_to_cursor(
+            self.dir_search_cursor,
+            &mut self.dir_scroll,
+            self.toc_height as usize,
+        );
     }
 
     /// After opening a file from dir search, apply the query as a content search.
@@ -932,28 +949,6 @@ impl App {
         idx.checked_sub(1)
     }
 
-    #[allow(dead_code)]
-    pub fn update_render(
-        &mut self,
-        rendered_lines: Vec<Line<'static>>,
-        image_positions: Vec<(usize, String, String)>,
-        node_line_starts: &[usize],
-    ) {
-        self.viewport_lines = rendered_lines;
-        self.image_positions = image_positions;
-        self.viewport_scroll = self.scroll;
-        self.viewport_dirty = false;
-        self.toc_line_indices = self
-            .document
-            .toc
-            .iter()
-            .map(|entry| node_line_starts.get(entry.node_index).copied().unwrap_or(0))
-            .collect();
-        self.scroll = self.scroll.min(self.max_scroll());
-        self.invalidate_search_cache();
-        self.sync_toc_to_scroll();
-    }
-
     fn touch_file_cache(&mut self, file_index: usize) {
         self.file_cache_order.retain(|&idx| idx != file_index);
         self.file_cache_order.push_back(file_index);
@@ -975,23 +970,6 @@ impl App {
         }
     }
 
-    #[allow(dead_code)]
-    fn sync_current_file_cache(&mut self) {
-        if !self.directory_mode {
-            return;
-        }
-        if let Some(file_index) = self.current_file_index {
-            let cached = CachedDocument {
-                document: Arc::clone(&self.document),
-                node_heights: self.node_heights.clone(),
-                node_line_starts: self.node_line_starts.clone(),
-                total_lines: self.total_content_lines,
-                toc_line_indices: self.toc_line_indices.clone(),
-            };
-            self.insert_file_cache(file_index, cached);
-        }
-    }
-
     // ---------------------------------------------------------------------------
     // Directory mode methods
     // ---------------------------------------------------------------------------
@@ -1008,11 +986,19 @@ impl App {
             if self.dir_search_cursor > 0 {
                 self.dir_search_cursor -= 1;
                 self.dir_cursor = self.search_matches[self.dir_search_cursor].line_idx;
-                clamp_scroll_to_cursor(self.dir_search_cursor, &mut self.dir_scroll, self.toc_height as usize);
+                clamp_scroll_to_cursor(
+                    self.dir_search_cursor,
+                    &mut self.dir_scroll,
+                    self.toc_height as usize,
+                );
             }
         } else {
             self.dir_cursor = self.dir_cursor.saturating_sub(1);
-            clamp_scroll_to_cursor(self.dir_cursor, &mut self.dir_scroll, self.toc_height as usize);
+            clamp_scroll_to_cursor(
+                self.dir_cursor,
+                &mut self.dir_scroll,
+                self.toc_height as usize,
+            );
         }
     }
 
@@ -1025,11 +1011,19 @@ impl App {
             if self.dir_search_cursor < max {
                 self.dir_search_cursor += 1;
                 self.dir_cursor = self.search_matches[self.dir_search_cursor].line_idx;
-                clamp_scroll_to_cursor(self.dir_search_cursor, &mut self.dir_scroll, self.toc_height as usize);
+                clamp_scroll_to_cursor(
+                    self.dir_search_cursor,
+                    &mut self.dir_scroll,
+                    self.toc_height as usize,
+                );
             }
         } else {
             self.dir_cursor = (self.dir_cursor + 1).min(self.dir_files.len() - 1);
-            clamp_scroll_to_cursor(self.dir_cursor, &mut self.dir_scroll, self.toc_height as usize);
+            clamp_scroll_to_cursor(
+                self.dir_cursor,
+                &mut self.dir_scroll,
+                self.toc_height as usize,
+            );
         }
     }
 
@@ -1047,15 +1041,14 @@ impl App {
         if self.dir_files.is_empty() {
             return;
         }
+        let visible = (self.toc_height as usize).max(1);
         if self.dir_search_active && !self.search_matches.is_empty() {
             let last = self.search_matches.len() - 1;
             self.dir_search_cursor = last;
             self.dir_cursor = self.search_matches[last].line_idx;
-            let visible = self.toc_height as usize;
             self.dir_scroll = last.saturating_sub(visible - 1);
         } else {
             self.dir_cursor = self.dir_files.len() - 1;
-            let visible = self.toc_height as usize;
             self.dir_scroll = self.dir_cursor.saturating_sub(visible - 1);
         }
     }
@@ -1171,7 +1164,6 @@ impl App {
 mod tests {
     use super::App;
     use crate::parser::{DocNode, Document, TocEntry};
-    use ratatui::text::Line;
     use std::path::PathBuf;
 
     #[test]
@@ -1217,9 +1209,6 @@ mod tests {
             vec![0, 2],
         );
         app.content_height = 2;
-
-        // Simulate a viewport update
-        app.update_render(vec![Line::default(); 5], vec![], &[0, 1, 2]);
 
         assert_eq!(app.toc_line_indices, vec![0, 2]);
         app.scroll_to(2);

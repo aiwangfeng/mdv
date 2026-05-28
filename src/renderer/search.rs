@@ -1,8 +1,6 @@
 //! Search highlighting: apply search result highlights to rendered lines.
 
-use ratatui::{
-    text::{Line, Span},
-};
+use ratatui::text::{Line, Span};
 
 use crate::theme::Theme;
 
@@ -12,6 +10,7 @@ pub fn apply_search_highlight(
     current_match: Option<crate::app::SearchMatch>,
     start_idx: usize,
     lowercased_texts: Option<&[&str]>,
+    text_offset: usize,
 ) -> Vec<Line<'static>> {
     if query.is_empty() {
         return lines;
@@ -31,7 +30,7 @@ pub fn apply_search_highlight(
             let line_idx = start_idx + i;
 
             let line_text: String = if let Some(texts) = lowercased_texts {
-                texts[i].to_string()
+                texts[text_offset + i].to_string()
             } else {
                 let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 if has_upper {

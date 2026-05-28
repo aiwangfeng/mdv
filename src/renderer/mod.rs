@@ -232,7 +232,12 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
                 }
 
                 // Nested content starts after the top border (if present).
-                let content_offset = if start_idx < lines.len() && !nested.image_positions.is_empty() { 1 } else { 0 };
+                let content_offset =
+                    if start_idx < lines.len() && !nested.image_positions.is_empty() {
+                        1
+                    } else {
+                        0
+                    };
                 image_positions.extend(
                     nested
                         .image_positions

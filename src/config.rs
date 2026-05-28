@@ -284,14 +284,18 @@ impl From<ThemeColors> for ThemeConfig {
 
 pub fn get() -> &'static Config {
     if CONFIG.get().is_none() {
-        let _ = load();
+        if let Err(e) = load() {
+            log::warn!("Config initialization failed (using defaults): {}", e);
+        }
     }
     CONFIG.get_or_init(Config::default)
 }
 
 pub fn keymap() -> &'static ResolvedKeybindings {
     if KEYMAP.get().is_none() {
-        let _ = load();
+        if let Err(e) = load() {
+            log::warn!("Keymap initialization failed (using defaults): {}", e);
+        }
     }
     KEYMAP.get().unwrap_or_else(|| &DEFAULT_KEYMAP)
 }

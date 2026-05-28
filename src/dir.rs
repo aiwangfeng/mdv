@@ -17,7 +17,7 @@ pub fn scan_markdown_files(dir: &Path) -> Vec<DirEntry> {
     let mut entries = Vec::new();
     let base = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     walk_dir(&base, &base, 0, &mut entries);
-    entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.modified));
     entries
 }
 
@@ -59,9 +59,7 @@ fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntr
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
-            let modified = fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             let rel_depth = path
                 .strip_prefix(base)
                 .map(|p| p.components().count().saturating_sub(1))
