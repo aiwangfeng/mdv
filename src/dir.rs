@@ -37,10 +37,14 @@ fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntr
     for entry in read_dir.flatten() {
         let path = entry.path();
 
-        let meta = match fs::metadata(&path) {
+        let meta = match fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(_) => continue,
         };
+
+        if meta.file_type().is_symlink() {
+            continue;
+        }
 
         if meta.is_dir() {
             if let Some(name) = path.file_name() {
@@ -77,6 +81,6 @@ fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntr
 fn is_markdown_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e == "md" || e == "markdown")
+        .map(|ext| matches!(ext, "md" | "markdown" | "mdx" | "mdown" | "mkd" | "mkdn"))
         .unwrap_or(false)
 }

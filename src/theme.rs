@@ -3,7 +3,7 @@
 
 use crate::config;
 use ratatui::style::{Modifier, Style};
-use std::cell::Cell;
+use std::cell::RefCell;
 
 pub struct Theme;
 
@@ -49,15 +49,20 @@ pub struct CachedStyles {
 }
 
 thread_local! {
-    static STYLE_CACHE: Cell<CachedStyles> = Cell::new(build_cached_styles());
+    static STYLE_CACHE: RefCell<CachedStyles> = RefCell::new(build_cached_styles());
 }
 
-fn cached_styles() -> CachedStyles {
-    STYLE_CACHE.get()
+fn get_style<F, R>(f: F) -> R
+where
+    F: FnOnce(&CachedStyles) -> R,
+{
+    STYLE_CACHE.with(|cell| f(&cell.borrow()))
 }
 
 pub fn refresh_cached_styles() {
-    STYLE_CACHE.set(build_cached_styles());
+    STYLE_CACHE.with(|cell| {
+        *cell.borrow_mut() = build_cached_styles();
+    });
 }
 
 fn build_cached_styles() -> CachedStyles {
@@ -161,22 +166,22 @@ fn build_cached_styles() -> CachedStyles {
 
 impl Theme {
     pub fn h1() -> Style {
-        cached_styles().h1
+        get_style(|s| s.h1)
     }
     pub fn h2() -> Style {
-        cached_styles().h2
+        get_style(|s| s.h2)
     }
     pub fn h3() -> Style {
-        cached_styles().h3
+        get_style(|s| s.h3)
     }
     pub fn h4() -> Style {
-        cached_styles().h4
+        get_style(|s| s.h4)
     }
     pub fn h5() -> Style {
-        cached_styles().h5
+        get_style(|s| s.h5)
     }
     pub fn h6() -> Style {
-        cached_styles().h6
+        get_style(|s| s.h6)
     }
 
     pub fn heading(level: u8) -> Style {
@@ -191,108 +196,107 @@ impl Theme {
     }
 
     pub fn text() -> Style {
-        cached_styles().text
+        get_style(|s| s.text)
     }
     pub fn subtext() -> Style {
-        cached_styles().subtext
+        get_style(|s| s.subtext)
     }
     pub fn bold() -> Style {
-        cached_styles().bold
+        get_style(|s| s.bold)
     }
     pub fn italic() -> Style {
-        cached_styles().italic
+        get_style(|s| s.italic)
     }
     pub fn bold_italic() -> Style {
-        cached_styles().bold_italic
+        get_style(|s| s.bold_italic)
     }
     pub fn strikethrough() -> Style {
-        cached_styles().strikethrough
+        get_style(|s| s.strikethrough)
     }
     pub fn inline_code() -> Style {
-        cached_styles().inline_code
+        get_style(|s| s.inline_code)
     }
     pub fn link() -> Style {
-        cached_styles().link
+        get_style(|s| s.link)
     }
     pub fn blockquote_bar() -> Style {
-        cached_styles().blockquote_bar
+        get_style(|s| s.blockquote_bar)
     }
     pub fn rule() -> Style {
-        cached_styles().rule
+        get_style(|s| s.rule)
     }
     pub fn table_header() -> Style {
-        cached_styles().table_header
+        get_style(|s| s.table_header)
     }
     pub fn table_border() -> Style {
-        cached_styles().table_border
+        get_style(|s| s.table_border)
     }
     pub fn table_row_even() -> Style {
-        cached_styles().table_row_even
+        get_style(|s| s.table_row_even)
     }
     pub fn table_row_odd() -> Style {
-        cached_styles().table_row_odd
+        get_style(|s| s.table_row_odd)
     }
     pub fn bullet(depth: usize) -> Style {
-        let cache = cached_styles();
-        cache.bullets[depth % cache.bullets.len()]
+        get_style(|s| s.bullets[depth % s.bullets.len()])
     }
     pub fn code_block_border() -> Style {
-        cached_styles().code_block_border
+        get_style(|s| s.code_block_border)
     }
     pub fn code_block_lang() -> Style {
-        cached_styles().code_block_lang
+        get_style(|s| s.code_block_lang)
     }
 
     // TOC panel
     pub fn toc_border() -> Style {
-        cached_styles().toc_border
+        get_style(|s| s.toc_border)
     }
     pub fn toc_border_focused() -> Style {
-        cached_styles().toc_border_focused
+        get_style(|s| s.toc_border_focused)
     }
     pub fn toc_title() -> Style {
-        cached_styles().toc_title
+        get_style(|s| s.toc_title)
     }
     pub fn toc_item(level: u8) -> Style {
         Self::heading(level).remove_modifier(Modifier::BOLD)
     }
     pub fn toc_selected() -> Style {
-        cached_styles().toc_selected
+        get_style(|s| s.toc_selected)
     }
     pub fn toc_synced() -> Style {
-        cached_styles().toc_synced
+        get_style(|s| s.toc_synced)
     }
 
     // Content panel
     pub fn content_border() -> Style {
-        cached_styles().content_border
+        get_style(|s| s.content_border)
     }
     pub fn content_border_focused() -> Style {
-        cached_styles().content_border_focused
+        get_style(|s| s.content_border_focused)
     }
     pub fn content_title() -> Style {
-        cached_styles().content_title
+        get_style(|s| s.content_title)
     }
 
     // Search
     pub fn search_match() -> Style {
-        cached_styles().search_match
+        get_style(|s| s.search_match)
     }
     pub fn search_current() -> Style {
-        cached_styles().search_current
+        get_style(|s| s.search_current)
     }
 
     // Status bar
     pub fn statusbar() -> Style {
-        cached_styles().statusbar
+        get_style(|s| s.statusbar)
     }
     pub fn statusbar_mode() -> Style {
-        cached_styles().statusbar_mode
+        get_style(|s| s.statusbar_mode)
     }
     pub fn statusbar_key() -> Style {
-        cached_styles().statusbar_key
+        get_style(|s| s.statusbar_key)
     }
     pub fn statusbar_dim() -> Style {
-        cached_styles().statusbar_dim
+        get_style(|s| s.statusbar_dim)
     }
 }

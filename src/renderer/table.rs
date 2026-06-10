@@ -4,7 +4,6 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthChar;
 
 use super::{
     display_width, TABLE_BOTTOM_LEFT, TABLE_BOTTOM_MID, TABLE_BOTTOM_RIGHT, TABLE_CELL_PADDING,
@@ -158,12 +157,12 @@ pub(super) fn truncate_text(s: &str, max_w: usize) -> String {
     let mut result = String::new();
     let mut w = 0;
     for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        let cw = crate::width::char_width(c);
         if w + cw > max_w {
-            let ellipsis_width = UnicodeWidthChar::width('…').unwrap_or(1);
+            let ellipsis_width = crate::width::char_width('…');
             while !result.is_empty() && w + ellipsis_width > max_w {
                 if let Some(removed) = result.pop() {
-                    w = w.saturating_sub(UnicodeWidthChar::width(removed).unwrap_or(0));
+                    w = w.saturating_sub(crate::width::char_width(removed));
                 }
             }
             if w + ellipsis_width <= max_w {
@@ -217,7 +216,3 @@ fn table_bottom_border(col_widths: &[usize], style: Style) -> Line<'static> {
         style,
     )
 }
-
-// ---------------------------------------------------------------------------
-// Search highlight: post-process rendered lines to apply highlights
-// ---------------------------------------------------------------------------

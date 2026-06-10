@@ -643,3 +643,71 @@ No language block
         );
     }
 }
+
+#[test]
+fn test_cjk_width_calculations() {
+    crate::width::set_cjk_width(false);
+    assert_eq!(crate::width::char_width('·'), 1);
+    assert_eq!(crate::width::char_width('✓'), 1);
+    assert_eq!(crate::width::char_width('中'), 2);
+    assert_eq!(crate::width::str_width("2024 · 车规"), 11); // 4 + 1 + 1 + 1 + 4 = 11
+
+    crate::width::set_cjk_width(true);
+    assert_eq!(crate::width::char_width('·'), 2);
+    assert_eq!(crate::width::char_width('✓'), 2);
+    assert_eq!(crate::width::char_width('中'), 2);
+    assert_eq!(crate::width::str_width("2024 · 车规"), 12); // 4 + 1 + 2 + 1 + 4 = 12
+}
+
+#[test]
+fn test_code_block_alignment_cjk() {
+    config::load().unwrap();
+    crate::width::set_cjk_width(true);
+    
+    let code = "2024 · 车规 ✓ |\n     · 沟槽 ✓ |";
+    let r = render_nodes(
+        &[DocNode::CodeBlock {
+            language: None,
+            code: code.to_string(),
+        }],
+        80,
+        80,
+    );
+    
+    // Check that the vertical bars are aligned on the same visual column
+    // The lines are:
+    // 0: top border
+    // 1: first line of code
+    // 2: second line of code
+    // 3: bottom border
+    assert_eq!(r.lines.len(), 4);
+    
+    // In ratatui Line, each span contains content. Let's find the column index of '|' visually.
+    let line1 = &r.lines[1];
+    let line2 = &r.lines[2];
+    
+    let width1: usize = line1.spans.iter().map(|s| crate::width::str_width(s.content.as_ref())).sum();
+    let width2: usize = line2.spans.iter().map(|s| crate::width::str_width(s.content.as_ref())).sum();
+    
+    // Both lines must have exactly the same display width (80) due to padding inside the code block border
+    assert_eq!(width1, 80);
+    assert_eq!(width2, 80);
+    
+    // Let's check the position of '|' inside the spans
+    let get_bar_pos = |line: &ratatui::text::Line| -> usize {
+        let mut pos = 0;
+        for span in &line.spans {
+            if let Some(idx) = span.content.find('|') {
+                pos += crate::width::str_width(&span.content[..idx]);
+                break;
+            }
+            pos += crate::width::str_width(span.content.as_ref());
+        }
+        pos
+    };
+    
+    let pos1 = get_bar_pos(line1);
+    let pos2 = get_bar_pos(line2);
+    assert_eq!(pos1, pos2, "Vertical bars should align exactly in CJK mode");
+}
+

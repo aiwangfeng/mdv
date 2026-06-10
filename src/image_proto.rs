@@ -11,10 +11,12 @@ use std::sync::Arc;
 use std::thread;
 
 const MAX_CONCURRENT_LOADS: usize = 4;
+const MAX_IMAGE_CACHE: usize = 64;
 
 pub struct ImageManager {
     picker: Option<Picker>,
     pub cache: HashMap<String, StatefulProtocol>,
+    cache_order: VecDeque<String>,
     pending: HashSet<String>,
     queued: HashSet<String>,
     queue: VecDeque<(String, PathBuf)>,
@@ -43,6 +45,7 @@ impl ImageManager {
             return Self {
                 picker: None,
                 cache: HashMap::new(),
+                cache_order: VecDeque::new(),
                 pending: HashSet::new(),
                 queued: HashSet::new(),
                 queue: VecDeque::new(),
@@ -56,6 +59,7 @@ impl ImageManager {
         Self {
             picker,
             cache: HashMap::new(),
+            cache_order: VecDeque::new(),
             pending: HashSet::new(),
             queued: HashSet::new(),
             queue: VecDeque::new(),
@@ -74,7 +78,7 @@ impl ImageManager {
         if src.starts_with('/') {
             let abs = PathBuf::from(src);
             let canonical = abs.canonicalize().ok()?;
-            let home = dirs_home();
+            let home = dirs_home()?;
             let pwd = std::env::var("PWD").ok().map(PathBuf::from);
             let allowed_prefixes: Vec<PathBuf> = std::iter::once(home)
                 .chain(pwd)
@@ -90,7 +94,7 @@ impl ImageManager {
             }
             Some(canonical)
         } else if let Some(rest) = src.strip_prefix("~/") {
-            let home = dirs_home();
+            let home = dirs_home()?;
             let resolved = home.join(rest);
             let canonical = resolved.canonicalize().ok()?;
             let home_canonical = home.canonicalize().ok()?;
@@ -147,7 +151,14 @@ impl ImageManager {
             match result {
                 Ok(img) => {
                     let protocol = self.picker.as_mut().unwrap().new_resize_protocol(img);
-                    self.cache.insert(src, protocol);
+                    self.cache.insert(src.clone(), protocol);
+                    self.cache_order.retain(|k| k != &src);
+                    self.cache_order.push_back(src);
+                    while self.cache.len() > MAX_IMAGE_CACHE {
+                        if let Some(old) = self.cache_order.pop_front() {
+                            self.cache.remove(&old);
+                        }
+                    }
                     new_images = true;
                 }
                 Err(e) => {
@@ -161,6 +172,10 @@ impl ImageManager {
     }
 
     pub fn get_protocol_mut(&mut self, src: &str) -> Option<&mut StatefulProtocol> {
+        if self.cache.contains_key(src) {
+            self.cache_order.retain(|k| k != src);
+            self.cache_order.push_back(src.to_string());
+        }
         self.cache.get_mut(src)
     }
 
@@ -204,11 +219,7 @@ impl ImageManager {
     }
 }
 
-fn dirs_home() -> PathBuf {
+fn dirs_home() -> Option<PathBuf> {
     directories::BaseDirs::new()
         .map(|base| base.home_dir().to_path_buf())
-        .unwrap_or_else(|| {
-            log::warn!("Home directory not found, defaulting to /tmp");
-            PathBuf::from("/tmp")
-        })
 }

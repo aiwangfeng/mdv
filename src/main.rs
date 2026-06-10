@@ -10,6 +10,7 @@ mod renderer;
 mod theme;
 mod themes;
 mod ui;
+mod width;
 
 use std::fs;
 use std::io;
@@ -101,6 +102,7 @@ fn load_visible_images(app: &App, img_mgr: &mut ImageManager) {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     config::load()?;
+    width::init_cjk_width(config::get().cjk_width);
     let cli = Cli::parse();
 
     let mut app = if let Some(path) = &cli.path {
@@ -439,21 +441,16 @@ fn handle_normal_key(
             true
         }
 
-        c if keys.focus_prev.matches(c, modifiers) => {
-            if app.focus == Focus::Content && app.show_toc {
-                app.focus = Focus::Toc;
-                true
-            } else {
-                false
-            }
+        c if keys.focus_prev.matches(c, modifiers)
+            && app.focus == Focus::Content
+            && app.show_toc =>
+        {
+            app.focus = Focus::Toc;
+            true
         }
-        c if keys.focus_next.matches(c, modifiers) => {
-            if app.focus == Focus::Toc {
-                app.focus = Focus::Content;
-                true
-            } else {
-                false
-            }
+        c if keys.focus_next.matches(c, modifiers) && app.focus == Focus::Toc => {
+            app.focus = Focus::Content;
+            true
         }
         KeyCode::Tab if modifiers.is_empty() => {
             app.toggle_focus();
@@ -527,14 +524,10 @@ fn handle_normal_key(
             before != app.scroll
         }
 
-        KeyCode::Enter if modifiers.is_empty() => {
-            if app.focus == Focus::Toc {
-                app.toc_jump_to_cursor();
-                app.focus = Focus::Content;
-                true
-            } else {
-                false
-            }
+        KeyCode::Enter if modifiers.is_empty() && app.focus == Focus::Toc => {
+            app.toc_jump_to_cursor();
+            app.focus = Focus::Content;
+            true
         }
 
         KeyCode::Char(']') if modifiers.is_empty() => {
@@ -567,7 +560,17 @@ fn handle_normal_key(
     }
 }
 
-fn handle_search_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -> bool {
+fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('c') | KeyCode::Char('d') => {
+                app.search_cancel();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     match code {
         KeyCode::Esc => {
             app.search_cancel();

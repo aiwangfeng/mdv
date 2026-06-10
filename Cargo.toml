@@ -2,6 +2,7 @@
 name = "mdv"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 description = "A TUI Markdown viewer with vim keybindings and inline image support"
 authors = []
 
@@ -15,7 +16,7 @@ ratatui = { version = "0.29", features = ["crossterm"] }
 crossterm = { version = "0.28" }
 
 # Markdown parsing
-pulldown-cmark = { version = "0.12", default-features = false }
+pulldown-cmark = { version = "0.12" }
 
 # Syntax highlighting
 syntect = { version = "5.2", default-features = false, features = ["default-onig"] }
@@ -42,3 +43,7 @@ unicode-width = "0.2"
 log = "0.4"
 env_logger = "0.11"
 unicode-normalization = "0.1.25"
+
+[profile.release]
+lto = true
+strip = true

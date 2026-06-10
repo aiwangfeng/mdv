@@ -30,9 +30,9 @@ pub(super) fn measure_node_height(node: &DocNode, width: u16) -> usize {
         DocNode::Heading { level, text } => {
             let prefix = super::inline::heading_prefix(*level);
             let heading_spans = vec![InlineSpan::Text(format!("{} {}", prefix, text))];
-            count_wrapped_inline_lines(&heading_spans, w.saturating_sub(1))
+            count_wrapped_inline_lines(&heading_spans, w)
         }
-        DocNode::Paragraph(spans) => count_wrapped_inline_lines(spans, w.saturating_sub(1)),
+        DocNode::Paragraph(spans) => count_wrapped_inline_lines(spans, w),
         DocNode::CodeBlock { code, .. } => {
             // max_content_width is width minus the borders ("│ " and " │")
             let left_border = display_width(super::CODE_BLOCK_LEFT_BORDER);
@@ -44,7 +44,7 @@ pub(super) fn measure_node_height(node: &DocNode, width: u16) -> usize {
                 // If it's the last empty split (due to trailing newline), skip if code ended with \n
                 let mut current_width = 0;
                 for c in line.chars() {
-                    let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                    let cw = crate::width::char_width(c);
                     if current_width + cw > max_content_width {
                         line_count += 1;
                         current_width = 0;
@@ -100,30 +100,10 @@ pub(super) fn measure_node_height(node: &DocNode, width: u16) -> usize {
 }
 
 fn split_width(text: &str, max_width: usize) -> (usize, &str) {
-    let mut width = 0usize;
-    let mut last_end = 0usize;
-
-    for (idx, ch) in text.char_indices() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        let ch_end = idx + ch.len_utf8();
-
-        if last_end > 0 && width + ch_width > max_width {
-            break;
-        }
-
-        if last_end == 0 && ch_width > max_width {
-            return (ch_width, &text[ch_end..]);
-        }
-
-        width += ch_width;
-        last_end = ch_end;
-    }
-
-    if last_end == 0 {
-        (0, "")
-    } else {
-        (width, &text[last_end..])
-    }
+    let split_at = super::byte_index_for_width(text, max_width);
+    let split_text = &text[..split_at];
+    let remaining = &text[split_at..];
+    (display_width(split_text), remaining)
 }
 
 fn simulate_push_word_with_extra(
@@ -137,6 +117,14 @@ fn simulate_push_word_with_extra(
     let mut extra_to_apply = extra;
 
     while !remaining.is_empty() || extra_to_apply > 0 {
+        // Trim leading spaces at line start to match push_wrapped_chunk behavior.
+        if *current_width == 0 && extra_to_apply == 0 {
+            remaining = remaining.trim_start_matches(' ');
+            if remaining.is_empty() {
+                break;
+            }
+        }
+
         let word_w = display_width(remaining) + extra_to_apply;
         if *current_width > 0 && *current_width + word_w > max_width {
             *lines += 1;

@@ -126,6 +126,7 @@ pub struct App {
 
     /// Cache of the currently visible viewport lines.
     viewport_scroll: usize,
+    viewport_raw_scroll: usize,
     viewport_lines: Vec<Line<'static>>,
     viewport_dirty: bool,
 
@@ -214,6 +215,7 @@ impl App {
             image_positions,
             toc_line_indices,
             viewport_scroll: 0,
+            viewport_raw_scroll: usize::MAX,
             viewport_lines: Vec::new(),
             viewport_dirty: true,
             full_rendered_texts: Vec::new(),
@@ -320,7 +322,7 @@ impl App {
     /// Returns true if the viewport was re-rendered.
     pub fn ensure_viewport_rendered(&mut self, width: u16, full_width: u16) -> bool {
         if !self.viewport_dirty
-            && self.viewport_scroll == self.scroll
+            && self.viewport_raw_scroll == self.scroll
             && !self.viewport_lines.is_empty()
         {
             return false;
@@ -341,6 +343,7 @@ impl App {
         self.viewport_lines = result.lines;
         self.image_positions = result.image_positions;
         self.viewport_scroll = scroll_start;
+        self.viewport_raw_scroll = self.scroll;
         self.viewport_dirty = false;
         true
     }
@@ -355,6 +358,9 @@ impl App {
 
     pub fn mark_viewport_dirty(&mut self) {
         self.viewport_dirty = true;
+    }
+
+    pub fn invalidate_full_render_cache(&mut self) {
         self.full_rendered_texts.clear();
         self.full_rendered_texts_lower.clear();
     }
@@ -365,6 +371,7 @@ impl App {
         self.node_line_starts = result.node_line_starts;
         self.total_content_lines = result.total_content_lines;
         self.toc_line_indices = result.toc_line_indices;
+        self.invalidate_full_render_cache();
     }
 
     /// Ensure full rendered line texts are available for search.
@@ -421,6 +428,14 @@ impl App {
     pub fn rendered_line_text_lower(&mut self, line_idx: usize) -> Option<&str> {
         self.ensure_full_rendered_texts();
         self.full_rendered_texts_lower
+            .get(line_idx)
+            .map(|s| s.as_str())
+    }
+
+    /// Get the original rendered text for a line, for search highlighting.
+    pub fn rendered_line_text(&mut self, line_idx: usize) -> Option<&str> {
+        self.ensure_full_rendered_texts();
+        self.full_rendered_texts
             .get(line_idx)
             .map(|s| s.as_str())
     }
@@ -957,7 +972,12 @@ impl App {
     fn insert_file_cache(&mut self, file_index: usize, cached: CachedDocument) {
         self.file_cache.insert(file_index, cached);
         self.touch_file_cache(file_index);
+        let mut attempts = 0;
         while self.file_cache.len() > MAX_FILE_CACHE {
+            attempts += 1;
+            if attempts > self.file_cache_order.len() {
+                break;
+            }
             if let Some(evicted) = self.file_cache_order.pop_front() {
                 if self.current_file_index == Some(evicted) {
                     self.file_cache_order.push_back(evicted);
@@ -965,6 +985,8 @@ impl App {
                 }
                 self.file_cache.remove(&evicted);
                 self.scroll_positions.remove(&evicted);
+                break;
+            } else {
                 break;
             }
         }
@@ -1103,6 +1125,7 @@ impl App {
         }
 
         self.image_positions = vec![];
+        self.invalidate_full_render_cache();
         self.mark_viewport_dirty();
 
         self.file_path = path;

@@ -4,7 +4,6 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthChar;
 
 use super::{display_width, INLINE_CODE_PADDING};
 use crate::parser::InlineSpan;
@@ -114,10 +113,6 @@ pub(super) fn soft_wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Ve
     lines
 }
 
-// ---------------------------------------------------------------------------
-// Code blocks with syntect highlighting
-// ---------------------------------------------------------------------------
-
 pub(super) fn push_wrapped_chunk(
     lines: &mut Vec<Line<'static>>,
     current_line: &mut Vec<Span<'static>>,
@@ -129,6 +124,17 @@ pub(super) fn push_wrapped_chunk(
     let mut remaining = text;
 
     while !remaining.is_empty() {
+        // Trim leading spaces at line start: they have no semantic value and cause misalignment.
+        if *current_width == 0 {
+            let trimmed = remaining.trim_start_matches(' ');
+            if trimmed.is_empty() {
+                break;
+            }
+            if trimmed.len() != remaining.len() {
+                remaining = trimmed;
+            }
+        }
+
         let remaining_width = display_width(remaining);
         if *current_width > 0 && *current_width + remaining_width > max_width {
             lines.push(Line::from(std::mem::take(current_line)));
@@ -142,37 +148,10 @@ pub(super) fn push_wrapped_chunk(
             break;
         }
 
-        let split_at = byte_index_for_width(remaining, max_width);
+        let split_at = super::byte_index_for_width(remaining, max_width);
         current_line.push(Span::styled(remaining[..split_at].to_string(), style));
         lines.push(Line::from(std::mem::take(current_line)));
         *current_width = 0;
         remaining = &remaining[split_at..];
-    }
-}
-
-pub(super) fn byte_index_for_width(text: &str, max_width: usize) -> usize {
-    let mut width = 0usize;
-    let mut last_end = 0usize;
-
-    for (idx, ch) in text.char_indices() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        let ch_end = idx + ch.len_utf8();
-
-        if last_end > 0 && width + ch_width > max_width {
-            break;
-        }
-
-        if last_end == 0 && ch_width > max_width {
-            return ch_end;
-        }
-
-        width += ch_width;
-        last_end = ch_end;
-    }
-
-    if last_end == 0 {
-        text.len()
-    } else {
-        last_end
     }
 }

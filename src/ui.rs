@@ -12,11 +12,12 @@ use ratatui::{
     Frame,
 };
 use ratatui_image::{Resize, StatefulImage};
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Focus, Mode};
 use crate::config;
 use crate::image_proto::ImageManager;
+
+const BORDER_SIZE: u16 = 2;
 use crate::renderer::{apply_search_highlight, IMAGE_RENDER_HEIGHT};
 use crate::theme::Theme;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -43,7 +44,7 @@ pub fn calculate_layout(app: &mut App, area: Rect) -> LayoutResult {
             Constraint::Percentage(100 - toc_pct),
         ])
         .areas(main_area);
-        app.toc_height = l.height.saturating_sub(2);
+        app.toc_height = l.height.saturating_sub(BORDER_SIZE);
         (Some(l), r)
     } else {
         app.toc_height = 0;
@@ -51,11 +52,12 @@ pub fn calculate_layout(app: &mut App, area: Rect) -> LayoutResult {
     };
 
     let content_margin = get_content_margin();
-    app.content_height = content_area.height.saturating_sub(2);
+    let effective_margin = (content_margin / 2) * 2;
+    app.content_height = content_area.height.saturating_sub(BORDER_SIZE);
     app.content_width = content_area
         .width
-        .saturating_sub(2)
-        .saturating_sub(content_margin);
+        .saturating_sub(BORDER_SIZE)
+        .saturating_sub(effective_margin);
     app.full_content_width = app.content_width;
     LayoutResult {
         toc_area,
@@ -189,7 +191,7 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                 format!(" {} files ", "\u{1f4c1}")
             };
             let visible_start = app.dir_scroll;
-            let visible_end = (visible_start + area.height.saturating_sub(2) as usize).min(total);
+            let visible_end = (visible_start + area.height.saturating_sub(BORDER_SIZE) as usize).min(total);
             let query_lower = app.search_query.to_lowercase();
             let items: Vec<ListItem> = (visible_start..visible_end)
                 .map(|pos| {
@@ -223,7 +225,7 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
             let title = format!(" {} TOC ", "📑");
             let synced = app.synced_toc_index();
             let visible_start = app.toc_scroll;
-            let visible_end = (visible_start + area.height.saturating_sub(2) as usize)
+            let visible_end = (visible_start + area.height.saturating_sub(BORDER_SIZE) as usize)
                 .min(app.document.toc.len());
             let items: Vec<ListItem> = app
                 .document
@@ -429,16 +431,19 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
             }
             let line_matches = app.rendered_line_matches(line_idx, &q, has_upper);
             if line_matches {
-                let lower_text = app
-                    .rendered_line_text_lower(line_idx)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                let line_text = if has_upper {
+                    app.rendered_line_text(line_idx)
+                } else {
+                    app.rendered_line_text_lower(line_idx)
+                }
+                .map(|s| s.to_string())
+                .unwrap_or_default();
                 let highlighted = apply_search_highlight(
                     vec![line.clone()],
                     &app.search_query,
                     current_match,
                     line_idx,
-                    Some(&[lower_text.as_str()]),
+                    Some(&[line_text.as_str()]),
                     0,
                 );
                 if let Some(hl_line) = highlighted.into_iter().next() {
@@ -558,8 +563,8 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let right = format!("{}{}", keys_text, right_text);
 
     // Pad to fill width
-    let left_width: usize = left.spans.iter().map(|s| s.content.as_ref().width()).sum();
-    let pad = (area.width as usize).saturating_sub(left_width + right.as_str().width());
+    let left_width: usize = left.spans.iter().map(|s| crate::width::str_width(s.content.as_ref())).sum();
+    let pad = (area.width as usize).saturating_sub(left_width + crate::width::str_width(right.as_str()));
 
     // Re-build as styled line preserving original left spans
     let mut status_spans = left.spans;
@@ -638,6 +643,7 @@ fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
         (fmt(keys.focus_next), "Focus Content"),
         (fmt(keys.toc_down), "TOC down"),
         (fmt(keys.toc_up), "TOC up"),
+        // Note: The following keybindings are currently hardcoded in main.rs and not configurable
         ("Enter".to_string(), "Jump to TOC entry"),
         ("]".to_string(), "Next heading"),
         ("[".to_string(), "Prev heading"),
@@ -652,7 +658,7 @@ fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
         ("Esc".to_string(), "Cancel / Close"),
     ];
 
-    let max_key_width = items.iter().map(|(k, _)| k.width()).max().unwrap_or(10);
+    let max_key_width = items.iter().map(|(k, _)| crate::width::str_width(k)).max().unwrap_or(10);
     let col_width = max_key_width + 4;
     let half = items.len().div_ceil(2);
     let left_items = &items[..half];
@@ -738,7 +744,7 @@ fn draw_theme_overlay(frame: &mut Frame, app: &App, area: Rect) {
         "{}/{} or ↑/↓ move   Enter confirm   Esc/{}/{} cancel",
         keys.down, keys.up, keys.next_theme, keys.quit
     );
-    let min_width = helper_text.width() as u16 + 4;
+    let min_width = crate::width::str_width(&helper_text) as u16 + 4;
     let width = area.width.min(min_width.max(30));
     let height = area.height.clamp(9, 12);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -816,7 +822,7 @@ fn draw_theme_overlay(frame: &mut Frame, app: &App, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn draw_toast(frame: &mut Frame, toast: &crate::app::Toast, area: Rect) {
-    let width = (toast.message.width() as u16 + 6)
+    let width = (crate::width::str_width(&toast.message) as u16 + 6)
         .min(area.width.saturating_sub(4))
         .max(20);
     let height = 3;
@@ -852,7 +858,7 @@ fn draw_toast(frame: &mut Frame, toast: &crate::app::Toast, area: Rect) {
 
 fn draw_first_run_hint(frame: &mut Frame, area: Rect) {
     let hint = "? for help";
-    let width = hint.width() as u16 + 4;
+    let width = crate::width::str_width(hint) as u16 + 4;
     let height = 1;
     let x = area.width.saturating_sub(width + 1);
     let y = area.height.saturating_sub(height + 2);

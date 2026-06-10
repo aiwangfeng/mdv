@@ -5,7 +5,6 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
 
 use crate::parser::DocNode;
 use crate::theme::Theme;
@@ -68,9 +67,36 @@ pub struct RenderResult {
     pub node_line_starts: Vec<usize>,
 }
 
+pub(super) fn byte_index_for_width(text: &str, max_width: usize) -> usize {
+    let mut width = 0usize;
+    let mut last_end = 0usize;
+
+    for (idx, ch) in text.char_indices() {
+        let ch_width = crate::width::char_width(ch);
+        let ch_end = idx + ch.len_utf8();
+
+        if last_end > 0 && width + ch_width > max_width {
+            break;
+        }
+
+        if last_end == 0 && ch_width > max_width {
+            return ch_end;
+        }
+
+        width += ch_width;
+        last_end = ch_end;
+    }
+
+    if last_end == 0 {
+        text.len()
+    } else {
+        last_end
+    }
+}
+
 #[inline]
 pub(super) fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
+    crate::width::str_width(text)
 }
 
 pub use measure::{compute_line_starts, measure_nodes};
@@ -165,13 +191,13 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
                     Span::styled(" ", style),
                     Span::styled(text.clone(), style),
                 ];
-                let wrapped = inline::soft_wrap_spans(spans, w.saturating_sub(1));
+                let wrapped = inline::soft_wrap_spans(spans, w);
                 lines.extend(wrapped);
             }
 
             DocNode::Paragraph(spans) => {
                 let rendered = inline::render_inline_spans(spans);
-                let wrapped = inline::soft_wrap_spans(rendered, w.saturating_sub(1));
+                let wrapped = inline::soft_wrap_spans(rendered, w);
                 lines.extend(wrapped);
             }
 
@@ -217,7 +243,7 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
                     lines.push(Line::from(quoted_spans));
                 }
 
-                if !start_idx.eq(&lines.len()) && start_idx + 1 < lines.len() {
+                if start_idx != lines.len() && start_idx + 1 < lines.len() {
                     let bot_bar_width = w.saturating_sub(
                         display_width(BLOCKQUOTE_BOTTOM_LEFT)
                             + display_width(BLOCKQUOTE_BOTTOM_RIGHT),
@@ -315,7 +341,3 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
         node_line_starts,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Heading prefixes
-// ---------------------------------------------------------------------------

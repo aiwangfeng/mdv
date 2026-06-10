@@ -176,6 +176,23 @@ impl ThemeColors {
     }
 }
 
+impl std::str::FromStr for ThemeName {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "catppuccin-mocha" | "catppuccin_mocha" | "catppuccinmocha" => {
+                Ok(Self::CatppuccinMocha)
+            }
+            "nord" => Ok(Self::Nord),
+            "gruvbox" | "gruvbox-dark" | "gruvbox_dark" | "gruvboxdark" => Ok(Self::GruvboxDark),
+            "tokyonight" | "tokyo-night" | "tokyo_night" => Ok(Self::TokyoNight),
+            "one-dark" | "one_dark" | "onedark" => Ok(Self::OneDark),
+            _ => Err(format!("Unknown theme: {}", s)),
+        }
+    }
+}
+
 impl ThemeName {
     pub fn display_name(self) -> &'static str {
         match self {
@@ -188,15 +205,6 @@ impl ThemeName {
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "catppuccin-mocha" | "catppuccin_mocha" | "catppuccinmocha" => {
-                Some(Self::CatppuccinMocha)
-            }
-            "nord" => Some(Self::Nord),
-            "gruvbox" | "gruvbox-dark" | "gruvbox_dark" | "gruvboxdark" => Some(Self::GruvboxDark),
-            "tokyonight" | "tokyo-night" | "tokyo_night" => Some(Self::TokyoNight),
-            "one-dark" | "one_dark" | "onedark" => Some(Self::OneDark),
-            _ => None,
-        }
+        <Self as std::str::FromStr>::from_str(s).ok()
     }
 }

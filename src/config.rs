@@ -70,6 +70,8 @@ pub struct Config {
     pub toc_width_pct: u16,
     #[serde(default = "default_content_margin")]
     pub content_margin: u16,
+    #[serde(default)]
+    pub cjk_width: Option<bool>,
 }
 
 fn default_toc_width_pct() -> u16 {
@@ -88,6 +90,7 @@ impl Default for Config {
             theme_name: String::new(),
             toc_width_pct: 20,
             content_margin: 4,
+            cjk_width: None,
         }
     }
 }
@@ -312,8 +315,9 @@ pub fn load() -> Result<()> {
         match fs::read_to_string(path) {
             Ok(content) => match toml::from_str::<Config>(&content) {
                 Ok(c) => {
-                    let keymap = ResolvedKeybindings::from_config(&c);
                     let mut config = c;
+                    config.toc_width_pct = config.toc_width_pct.clamp(10, 50);
+                    let keymap = ResolvedKeybindings::from_config(&config);
                     if !config.theme_name.is_empty() {
                         if let Some(theme_name) = ThemeName::from_str(&config.theme_name) {
                             config.theme = ThemeConfig::from(ThemeColors::from_theme(theme_name));
@@ -417,17 +421,28 @@ fn parse_key_code(s: &str) -> KeyCode {
     }
 }
 
+#[allow(unused_assignments)]
 pub fn parse_key(s: &str) -> KeyBinding {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return KeyBinding::new(KeyCode::Null, KeyModifiers::empty());
     }
 
-    let parts: Vec<&str> = trimmed.split('-').collect();
-    let (modifier_parts, key_part) = if parts.len() > 1 {
-        (&parts[..parts.len() - 1], parts[parts.len() - 1])
+    let parts: Vec<&str>;
+    let (modifier_parts, key_part) = if trimmed == "-" {
+        parts = Vec::new();
+        (&[][..], "-")
+    } else if trimmed.ends_with("--") {
+        let without_last_dash = &trimmed[..trimmed.len() - 1];
+        parts = without_last_dash.split('-').collect();
+        (&parts[..parts.len() - 1], "-")
     } else {
-        (&[][..], trimmed)
+        parts = trimmed.split('-').collect();
+        if parts.len() > 1 {
+            (&parts[..parts.len() - 1], parts[parts.len() - 1])
+        } else {
+            (&[][..], trimmed)
+        }
     };
 
     let mut modifiers = KeyModifiers::empty();
@@ -536,6 +551,18 @@ mod tests {
         assert_eq!(
             keymap.search,
             KeyBinding::new(KeyCode::Char('/'), KeyModifiers::empty())
+        );
+    }
+
+    #[test]
+    fn parses_dash_bindings() {
+        assert_eq!(
+            parse_key("-"),
+            KeyBinding::new(KeyCode::Char('-'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            parse_key("ctrl--"),
+            KeyBinding::new(KeyCode::Char('-'), KeyModifiers::CONTROL)
         );
     }
 }

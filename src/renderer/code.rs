@@ -25,7 +25,7 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
+use std::hash::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
@@ -59,7 +59,10 @@ fn get_cached_regions(cache_key: &CacheKey) -> Option<CachedHighlightRegions> {
 fn cache_regions(cache_key: CacheKey, regions: CachedHighlightRegions) {
     HL_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if !cache.map.contains_key(&cache_key) {
+        if cache.map.contains_key(&cache_key) {
+            cache.order.retain(|k| k != &cache_key);
+            cache.order.push_back(cache_key.clone());
+        } else {
             cache.order.push_back(cache_key.clone());
             while cache.order.len() > MAX_HL_CACHE {
                 if let Some(evicted) = cache.order.pop_front() {
@@ -164,12 +167,11 @@ pub(super) fn render_code_block(
             let mut current_chunk = String::new();
 
             for c in text.chars() {
-                let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                let c_width = crate::width::char_width(c);
 
                 if current_line_content_width + c_width > max_content_width {
                     if !current_chunk.is_empty() {
-                        current_line_spans.push(Span::styled(current_chunk.clone(), s));
-                        current_chunk.clear();
+                        current_line_spans.push(Span::styled(std::mem::take(&mut current_chunk), s));
                     }
 
                     let padding = max_content_width.saturating_sub(current_line_content_width);
@@ -230,6 +232,4 @@ pub(super) fn syntect_color_to_ratatui(c: syntect::highlighting::Color) -> ratat
     ratatui::style::Color::Rgb(c.r, c.g, c.b)
 }
 
-// ---------------------------------------------------------------------------
-// Tables
-// ---------------------------------------------------------------------------
+

@@ -71,7 +71,6 @@ type EventIter<'a> = Peekable<Parser<'a>>;
 pub fn parse(markdown: &str) -> Document {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
 
@@ -122,11 +121,10 @@ fn extract_code_content(events: &mut EventIter<'_>) -> String {
 fn extract_language(kind: &pulldown_cmark::CodeBlockKind) -> Option<String> {
     match kind {
         pulldown_cmark::CodeBlockKind::Fenced(lang) => {
-            let s = lang.clone().into_string();
-            if s.is_empty() {
+            if lang.is_empty() {
                 None
             } else {
-                Some(s)
+                Some(lang.to_string())
             }
         }
         pulldown_cmark::CodeBlockKind::Indented => None,
@@ -197,7 +195,22 @@ fn handle_inline_event(
             }
         }
         Event::Code(t) => {
-            spans.push(InlineSpan::Code(t.into_string()));
+            if state.link_url.is_some() {
+                state.link_text.push_str(&format!("`{}`", t));
+            } else {
+                spans.push(InlineSpan::Code(t.into_string()));
+            }
+        }
+        Event::Html(t) | Event::InlineHtml(t) => {
+            if state.link_url.is_some() {
+                state.link_text.push_str(&t);
+            } else {
+                spans.push(InlineSpan::Text(t.into_string()));
+            }
+        }
+        Event::TaskListMarker(checked) => {
+            let marker = if checked { "☑ " } else { "☐ " };
+            spans.push(InlineSpan::Text(marker.to_string()));
         }
         Event::SoftBreak => spans.push(InlineSpan::SoftBreak),
         Event::HardBreak => spans.push(InlineSpan::HardBreak),
@@ -327,6 +340,11 @@ fn parse_blocks(
                 nodes.push(DocNode::Blank);
             }
 
+            Event::Html(t) => {
+                nodes.push(DocNode::Paragraph(vec![InlineSpan::Text(t.into_string())]));
+                nodes.push(DocNode::Blank);
+            }
+
             Event::HardBreak | Event::SoftBreak => {}
 
             _ => {}
@@ -417,8 +435,7 @@ fn collect_table(
                     current_cell.clear();
                 }
                 if !current_row.is_empty() {
-                    *headers = current_row.clone();
-                    current_row.clear();
+                    *headers = std::mem::take(&mut current_row);
                 }
                 in_head = false;
             }
@@ -431,8 +448,7 @@ fn collect_table(
                     current_cell.clear();
                 }
                 if !in_head && !current_row.is_empty() {
-                    rows.push(current_row.clone());
-                    current_row.clear();
+                    rows.push(std::mem::take(&mut current_row));
                 }
             }
             Event::Start(Tag::TableCell) => {
@@ -772,6 +788,63 @@ mod tests {
                 );
             }
             other => panic!("expected ListItem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_task_list_items() {
+        let document = parse("- [x] done\n- [ ] todo\n");
+        let list_nodes: Vec<&DocNode> = document
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, DocNode::ListItem { .. }))
+            .collect();
+        assert_eq!(list_nodes.len(), 2);
+        if let DocNode::ListItem { children, .. } = &list_nodes[0] {
+            assert!(matches!(&children[0], InlineSpan::Text(s) if s == "☑ "));
+        } else {
+            panic!("expected ListItem");
+        }
+        if let DocNode::ListItem { children, .. } = &list_nodes[1] {
+            assert!(matches!(&children[0], InlineSpan::Text(s) if s == "☐ "));
+        } else {
+            panic!("expected ListItem");
+        }
+    }
+
+    #[test]
+    fn parses_code_in_link() {
+        let document = parse("[`code`](url)");
+        match &document.nodes[0] {
+            DocNode::Paragraph(spans) => match &spans[0] {
+                InlineSpan::Link { text, url } => {
+                    assert_eq!(text, "`code`");
+                    assert_eq!(url, "url");
+                }
+                other => panic!("expected Link, got {other:?}"),
+            },
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_html_blocks_and_inline() {
+        let document = parse("<div>test</div>\n\nhello <span>world</span>");
+        assert_eq!(document.nodes.len(), 4); // Para1 + Blank1 + Para2 + Blank2
+        match &document.nodes[0] {
+            DocNode::Paragraph(spans) => {
+                assert_eq!(spans[0], InlineSpan::Text("<div>test</div>\n".to_string()));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+        match &document.nodes[2] {
+            DocNode::Paragraph(spans) => {
+                assert_eq!(spans[0], InlineSpan::Text("hello ".to_string()));
+                assert_eq!(spans[1], InlineSpan::Text("<span>".to_string()));
+                assert_eq!(spans[2], InlineSpan::Text("world".to_string()));
+                assert_eq!(spans[3], InlineSpan::Text("</span>".to_string()));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
         }
     }
 }
