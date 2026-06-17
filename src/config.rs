@@ -421,27 +421,24 @@ fn parse_key_code(s: &str) -> KeyCode {
     }
 }
 
-#[allow(unused_assignments)]
 pub fn parse_key(s: &str) -> KeyBinding {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return KeyBinding::new(KeyCode::Null, KeyModifiers::empty());
     }
 
-    let parts: Vec<&str>;
-    let (modifier_parts, key_part) = if trimmed == "-" {
-        parts = Vec::new();
-        (&[][..], "-")
+    let (modifier_parts, key_part): (Vec<&str>, &str) = if trimmed == "-" {
+        (Vec::new(), "-")
     } else if trimmed.ends_with("--") {
         let without_last_dash = &trimmed[..trimmed.len() - 1];
-        parts = without_last_dash.split('-').collect();
-        (&parts[..parts.len() - 1], "-")
+        let parts: Vec<&str> = without_last_dash.split('-').collect();
+        (parts[..parts.len() - 1].to_vec(), "-")
     } else {
-        parts = trimmed.split('-').collect();
+        let parts: Vec<&str> = trimmed.split('-').collect();
         if parts.len() > 1 {
-            (&parts[..parts.len() - 1], parts[parts.len() - 1])
+            (parts[..parts.len() - 1].to_vec(), parts[parts.len() - 1])
         } else {
-            (&[][..], trimmed)
+            (Vec::new(), trimmed)
         }
     };
 

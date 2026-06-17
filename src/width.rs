@@ -31,11 +31,8 @@ pub fn char_width(c: char) -> usize {
     if is_cjk() {
         match c {
             // Common Neutral/Narrow symbols rendered as double-width in CJK terminals
-            '✓' | '✗' | '✔' | '✘' |
-            '★' | '☆' | '●' | '○' |
-            '▲' | '▼' | '◀' | '▶' |
-            '▪' | '▫' | '•' | '◦' | '▸' | '▹' |
-            '⚠' => 2,
+            '✓' | '✗' | '✔' | '✘' | '★' | '☆' | '●' | '○' | '▲' | '▼' | '◀' | '▶' | '▪' | '▫'
+            | '•' | '◦' | '▸' | '▹' | '⚠' => 2,
             _ => c.width_cjk().unwrap_or(0),
         }
     } else {

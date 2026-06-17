@@ -264,7 +264,7 @@ fn run(
                     resize_deadline =
                         Some(Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
                 } else {
-                    needs_redraw |= handle_app_event(app, img_mgr, event);
+                    needs_redraw |= handle_app_event(app, event);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -276,7 +276,7 @@ fn run(
                 let _ = (w, h);
                 resize_deadline = Some(Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
             } else {
-                needs_redraw |= handle_app_event(app, img_mgr, message);
+                needs_redraw |= handle_app_event(app, message);
             }
         }
 
@@ -325,13 +325,13 @@ fn spawn_input_thread(tx: mpsc::Sender<AppEvent>, stop: Arc<AtomicBool>) -> thre
     })
 }
 
-fn handle_app_event(app: &mut App, img_mgr: &mut ImageManager, event: AppEvent) -> bool {
+fn handle_app_event(app: &mut App, event: AppEvent) -> bool {
     match event {
         AppEvent::Key { code, modifiers } => {
             if app.first_run {
                 app.first_run = false;
             }
-            handle_key(app, img_mgr, code, modifiers)
+            handle_key(app, code, modifiers)
         }
         AppEvent::Resize(_, _) => false,
         AppEvent::InputClosed => {
@@ -345,26 +345,16 @@ fn handle_app_event(app: &mut App, img_mgr: &mut ImageManager, event: AppEvent) 
 // Key handling
 // ---------------------------------------------------------------------------
 
-fn handle_key(
-    app: &mut App,
-    img_mgr: &mut ImageManager,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> bool {
+fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     match app.mode {
         Mode::Search => handle_search_key(app, code, modifiers),
         Mode::Help => handle_help_key(app, code, modifiers),
         Mode::ThemePicker => handle_theme_picker_key(app, code, modifiers),
-        Mode::Normal => handle_normal_key(app, img_mgr, code, modifiers),
+        Mode::Normal => handle_normal_key(app, code, modifiers),
     }
 }
 
-fn handle_normal_key(
-    app: &mut App,
-    img_mgr: &mut ImageManager,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> bool {
+fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     if code == KeyCode::Null {
         return false;
     }
@@ -400,8 +390,7 @@ fn handle_normal_key(
                 }
                 KeyCode::Enter if modifiers.is_empty() => {
                     let cursor = app.dir_cursor;
-                    let base_dir = app.dir_base.clone();
-                    return app.open_file_from_dir(cursor, &base_dir, img_mgr);
+                    return app.open_file_from_dir(cursor);
                 }
                 c if keys.search.matches(c, modifiers) => {
                     app.start_dir_search();

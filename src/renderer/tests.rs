@@ -540,7 +540,7 @@ No language block
 #[test]
 fn test_heading_height_mismatch_fuzz() {
     config::load().unwrap();
-    let words = vec![
+    let words = [
         "word",
         "longerword",
         "verylongwordthatmightwrapitself",
@@ -663,7 +663,7 @@ fn test_cjk_width_calculations() {
 fn test_code_block_alignment_cjk() {
     config::load().unwrap();
     crate::width::set_cjk_width(true);
-    
+
     let code = "2024 · 车规 ✓ |\n     · 沟槽 ✓ |";
     let r = render_nodes(
         &[DocNode::CodeBlock {
@@ -673,7 +673,7 @@ fn test_code_block_alignment_cjk() {
         80,
         80,
     );
-    
+
     // Check that the vertical bars are aligned on the same visual column
     // The lines are:
     // 0: top border
@@ -681,18 +681,26 @@ fn test_code_block_alignment_cjk() {
     // 2: second line of code
     // 3: bottom border
     assert_eq!(r.lines.len(), 4);
-    
+
     // In ratatui Line, each span contains content. Let's find the column index of '|' visually.
     let line1 = &r.lines[1];
     let line2 = &r.lines[2];
-    
-    let width1: usize = line1.spans.iter().map(|s| crate::width::str_width(s.content.as_ref())).sum();
-    let width2: usize = line2.spans.iter().map(|s| crate::width::str_width(s.content.as_ref())).sum();
-    
+
+    let width1: usize = line1
+        .spans
+        .iter()
+        .map(|s| crate::width::str_width(s.content.as_ref()))
+        .sum();
+    let width2: usize = line2
+        .spans
+        .iter()
+        .map(|s| crate::width::str_width(s.content.as_ref()))
+        .sum();
+
     // Both lines must have exactly the same display width (80) due to padding inside the code block border
     assert_eq!(width1, 80);
     assert_eq!(width2, 80);
-    
+
     // Let's check the position of '|' inside the spans
     let get_bar_pos = |line: &ratatui::text::Line| -> usize {
         let mut pos = 0;
@@ -705,9 +713,8 @@ fn test_code_block_alignment_cjk() {
         }
         pos
     };
-    
+
     let pos1 = get_bar_pos(line1);
     let pos2 = get_bar_pos(line2);
     assert_eq!(pos1, pos2, "Vertical bars should align exactly in CJK mode");
 }
-

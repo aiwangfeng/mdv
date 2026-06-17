@@ -171,7 +171,8 @@ pub(super) fn render_code_block(
 
                 if current_line_content_width + c_width > max_content_width {
                     if !current_chunk.is_empty() {
-                        current_line_spans.push(Span::styled(std::mem::take(&mut current_chunk), s));
+                        current_line_spans
+                            .push(Span::styled(std::mem::take(&mut current_chunk), s));
                     }
 
                     let padding = max_content_width.saturating_sub(current_line_content_width);
@@ -231,5 +232,3 @@ pub(super) fn render_code_block(
 pub(super) fn syntect_color_to_ratatui(c: syntect::highlighting::Color) -> ratatui::style::Color {
     ratatui::style::Color::Rgb(c.r, c.g, c.b)
 }
-
-

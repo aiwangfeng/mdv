@@ -180,9 +180,9 @@ impl ImageManager {
     }
 
     fn start_load(&mut self, src: String, path: PathBuf) -> bool {
-        let prev = self.active_loads.fetch_add(1, Ordering::SeqCst);
+        let prev = self.active_loads.fetch_add(1, Ordering::Relaxed);
         if prev >= MAX_CONCURRENT_LOADS {
-            self.active_loads.fetch_sub(1, Ordering::SeqCst);
+            self.active_loads.fetch_sub(1, Ordering::Relaxed);
             return false;
         }
 
@@ -192,7 +192,7 @@ impl ImageManager {
 
         thread::spawn(move || {
             let result = image::open(&path);
-            active_loads.fetch_sub(1, Ordering::SeqCst);
+            active_loads.fetch_sub(1, Ordering::Relaxed);
             if sender.send((src, result)).is_err() {
                 log::warn!("Failed to send loaded image - receiver dropped");
             }
@@ -220,6 +220,5 @@ impl ImageManager {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    directories::BaseDirs::new()
-        .map(|base| base.home_dir().to_path_buf())
+    directories::BaseDirs::new().map(|base| base.home_dir().to_path_buf())
 }

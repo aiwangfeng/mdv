@@ -191,7 +191,8 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                 format!(" {} files ", "\u{1f4c1}")
             };
             let visible_start = app.dir_scroll;
-            let visible_end = (visible_start + area.height.saturating_sub(BORDER_SIZE) as usize).min(total);
+            let visible_end =
+                (visible_start + area.height.saturating_sub(BORDER_SIZE) as usize).min(total);
             let query_lower = app.search_query.to_lowercase();
             let items: Vec<ListItem> = (visible_start..visible_end)
                 .map(|pos| {
@@ -426,7 +427,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
         for (i, line) in visible_slice.into_iter().enumerate() {
             let line_idx = scroll + i;
             if let Some(cached) = app.get_cached_highlight(line_idx) {
-                result.push(cached.clone());
+                result.push(cached);
                 continue;
             }
             let line_matches = app.rendered_line_matches(line_idx, &q, has_upper);
@@ -440,7 +441,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
                 .unwrap_or_default();
                 let highlighted = apply_search_highlight(
                     vec![line.clone()],
-                    &app.search_query,
+                    &app.search_query_norm,
                     current_match,
                     line_idx,
                     Some(&[line_text.as_str()]),
@@ -515,7 +516,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let scroll_pct = if app.total_lines() == 0 {
         100
     } else {
-        (app.scroll * 100 / app.total_lines().max(1)).min(100)
+        ((app.scroll as u64 * 100) / (app.total_lines().max(1) as u64)).min(100) as usize
     };
 
     let search_hint = if !app.search_query.is_empty() {
@@ -537,10 +538,30 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let theme_name = config::current_theme_name();
     let keys = config::keymap();
     let key_label = |binding: config::KeyBinding| -> String {
-        match binding.code {
+        let modifier_prefix = if binding.modifiers.contains(KeyModifiers::CONTROL) {
+            "C-"
+        } else if binding.modifiers.contains(KeyModifiers::ALT) {
+            "M-"
+        } else {
+            ""
+        };
+        let key_str = match binding.code {
             KeyCode::Char(c) => c.to_string(),
+            KeyCode::Esc => "Esc".to_string(),
+            KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Tab => "Tab".to_string(),
+            KeyCode::Backspace => "BS".to_string(),
+            KeyCode::Up => "↑".to_string(),
+            KeyCode::Down => "↓".to_string(),
+            KeyCode::Left => "←".to_string(),
+            KeyCode::Right => "→".to_string(),
+            KeyCode::PageUp => "PgUp".to_string(),
+            KeyCode::PageDown => "PgDn".to_string(),
+            KeyCode::Home => "Home".to_string(),
+            KeyCode::End => "End".to_string(),
             _ => "?".to_string(),
-        }
+        };
+        format!("{}{}", modifier_prefix, key_str)
     };
     let keys_text = format!(
         " {}:{}  {}:{}  {}:{}  {}:{}  {}/{}:focus  {}/{}:scroll  {}:theme({}) ",
@@ -563,8 +584,13 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let right = format!("{}{}", keys_text, right_text);
 
     // Pad to fill width
-    let left_width: usize = left.spans.iter().map(|s| crate::width::str_width(s.content.as_ref())).sum();
-    let pad = (area.width as usize).saturating_sub(left_width + crate::width::str_width(right.as_str()));
+    let left_width: usize = left
+        .spans
+        .iter()
+        .map(|s| crate::width::str_width(s.content.as_ref()))
+        .sum();
+    let pad =
+        (area.width as usize).saturating_sub(left_width + crate::width::str_width(right.as_str()));
 
     // Re-build as styled line preserving original left spans
     let mut status_spans = left.spans;
@@ -658,7 +684,11 @@ fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
         ("Esc".to_string(), "Cancel / Close"),
     ];
 
-    let max_key_width = items.iter().map(|(k, _)| crate::width::str_width(k)).max().unwrap_or(10);
+    let max_key_width = items
+        .iter()
+        .map(|(k, _)| crate::width::str_width(k))
+        .max()
+        .unwrap_or(10);
     let col_width = max_key_width + 4;
     let half = items.len().div_ceil(2);
     let left_items = &items[..half];
@@ -827,12 +857,12 @@ fn draw_toast(frame: &mut Frame, toast: &crate::app::Toast, area: Rect) {
         .max(20);
     let height = 3;
     let x = (area.width.saturating_sub(width)) / 2;
-    let y = area.height.saturating_sub(height + 3);
+    let y = area.height.saturating_sub(height + 3).max(area.y);
     let toast_area = Rect {
         x,
         y,
-        width,
-        height,
+        width: width.min(area.width),
+        height: height.min(area.height),
     };
 
     frame.render_widget(Clear, toast_area);

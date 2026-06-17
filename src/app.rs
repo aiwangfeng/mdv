@@ -3,7 +3,7 @@
 
 use ratatui::text::Line;
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -173,7 +173,6 @@ pub struct App {
     pub directory_mode: bool,
     pub dir_view: DirView,
     pub dir_files: Vec<crate::dir::DirEntry>,
-    pub dir_base: PathBuf,
     pub dir_cursor: usize,
     pub dir_scroll: usize,
     pub current_file_index: Option<usize>,
@@ -200,7 +199,6 @@ impl App {
         directory_mode: bool,
         dir_view: DirView,
         dir_files: Vec<crate::dir::DirEntry>,
-        dir_base: PathBuf,
         focus: Focus,
         first_run: bool,
     ) -> Self {
@@ -250,7 +248,6 @@ impl App {
             directory_mode,
             dir_view,
             dir_files,
-            dir_base,
             dir_cursor: 0,
             dir_scroll: 0,
             current_file_index: None,
@@ -288,7 +285,6 @@ impl App {
             false,
             DirView::FileView,
             vec![],
-            PathBuf::new(),
             Focus::Content,
             true,
         )
@@ -312,7 +308,6 @@ impl App {
             true,
             DirView::FileList,
             dir_files,
-            dir_base,
             Focus::Toc,
             false,
         )
@@ -435,9 +430,7 @@ impl App {
     /// Get the original rendered text for a line, for search highlighting.
     pub fn rendered_line_text(&mut self, line_idx: usize) -> Option<&str> {
         self.ensure_full_rendered_texts();
-        self.full_rendered_texts
-            .get(line_idx)
-            .map(|s| s.as_str())
+        self.full_rendered_texts.get(line_idx).map(|s| s.as_str())
     }
 
     // ---------------------------------------------------------------------------
@@ -629,7 +622,6 @@ impl App {
     fn schedule_search(&mut self) {
         self.search_dirty = true;
         self.search_deadline = Some(Instant::now() + Duration::from_millis(SEARCH_DEBOUNCE_MS));
-        self.invalidate_search_cache();
     }
 
     fn flush_search(&mut self) {
@@ -842,11 +834,18 @@ impl App {
         self.run_search();
     }
 
-    pub fn get_cached_highlight(&self, line_idx: usize) -> Option<&Line<'static>> {
+    pub fn get_cached_highlight(&mut self, line_idx: usize) -> Option<Line<'static>> {
         if self.cached_search_query.as_ref() != Some(&self.search_query) {
             return None;
         }
-        self.search_highlight_cache.get(&line_idx)
+        if self.search_highlight_cache.contains_key(&line_idx) {
+            // Touch: move to back of LRU order so recently accessed entries are kept longest
+            self.search_highlight_order.retain(|&k| k != line_idx);
+            self.search_highlight_order.push_back(line_idx);
+            self.search_highlight_cache.get(&line_idx).cloned()
+        } else {
+            None
+        }
     }
 
     pub fn cache_highlight(&mut self, line_idx: usize, line: Line<'static>) {
@@ -1075,12 +1074,7 @@ impl App {
         }
     }
 
-    pub fn open_file_from_dir(
-        &mut self,
-        file_index: usize,
-        _base_dir: &Path,
-        img_mgr: &mut crate::image_proto::ImageManager,
-    ) -> bool {
+    pub fn open_file_from_dir(&mut self, file_index: usize) -> bool {
         if file_index >= self.dir_files.len() {
             return false;
         }
@@ -1130,7 +1124,6 @@ impl App {
 
         self.file_path = path;
         self.file_name = display_name;
-        let _ = img_mgr;
 
         // Apply directory search query as content search after opening
         let dir_query = if self.dir_search_active {
