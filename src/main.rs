@@ -201,14 +201,10 @@ fn run(
     let mut needs_redraw = true;
     let mut resize_deadline: Option<Instant> = None;
 
-    // Initial layout (only re-run on resize events)
-    {
-        let size = terminal.size()?;
-        ui::calculate_layout(
-            app,
-            ratatui::layout::Rect::new(0, 0, size.width, size.height),
-        );
-    }
+    // Initial layout
+    let size = terminal.size()?;
+    let mut terminal_size = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+    ui::calculate_layout(app, terminal_size);
     let mut last_render_width = app.content_width;
 
     loop {
@@ -216,10 +212,8 @@ fn run(
             if Instant::now() >= deadline {
                 resize_deadline = None;
                 let size = terminal.size()?;
-                ui::calculate_layout(
-                    app,
-                    ratatui::layout::Rect::new(0, 0, size.width, size.height),
-                );
+                terminal_size = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+                ui::calculate_layout(app, terminal_size);
                 let cw = app.content_width;
                 if cw > 0 && cw != last_render_width {
                     app.remeasure(cw);
@@ -230,7 +224,16 @@ fn run(
             }
         }
 
+        // Keep content_width in sync with app settings (e.g. show_toc, toc_width_pct)
+        ui::calculate_layout(app, terminal_size);
+
         let cw = app.content_width;
+        if cw > 0 && cw != last_render_width {
+            app.remeasure(cw);
+            last_render_width = cw;
+            app.mark_viewport_dirty();
+        }
+
         let fw = app.full_content_width;
 
         if app.ensure_viewport_rendered(cw, fw) {
