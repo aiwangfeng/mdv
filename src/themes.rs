@@ -207,4 +207,14 @@ impl ThemeName {
     pub fn from_str(s: &str) -> Option<Self> {
         <Self as std::str::FromStr>::from_str(s).ok()
     }
+
+    pub fn syntect_theme_name(self) -> &'static str {
+        match self {
+            Self::CatppuccinMocha => "base16-mocha.dark",
+            Self::Nord => "base16-ocean.dark",
+            Self::GruvboxDark => "base16-eighties.dark",
+            Self::TokyoNight => "base16-ocean.dark",
+            Self::OneDark => "base16-ocean.dark",
+        }
+    }
 }

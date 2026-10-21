@@ -186,9 +186,14 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                 app.dir_files.len()
             };
             let title = if filtered {
-                format!(" {} files (/{}) ", "\u{1f4c1}", app.search_query)
+                format!(
+                    " 📁 {}/{} files (/{}) ",
+                    app.search_matches.len(),
+                    app.dir_files.len(),
+                    app.search_query
+                )
             } else {
-                format!(" {} files ", "\u{1f4c1}")
+                format!(" 📁 {} files ", app.dir_files.len())
             };
             let visible_start = app.dir_scroll;
             let visible_end =
@@ -202,7 +207,7 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                         pos
                     };
                     let entry = &app.dir_files[file_idx];
-                    let indent = "  ".repeat(entry.depth);
+                    let prefix = "  ";
                     let base_style = if file_idx == app.dir_cursor && focused {
                         Theme::toc_selected()
                     } else {
@@ -210,10 +215,10 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                     };
                     // Highlight matching substring in file name when filter is active
                     let spans = if filtered && !query_lower.is_empty() {
-                        highlight_file_name(&indent, &entry.display_name, &query_lower, base_style)
+                        highlight_file_name(prefix, &entry.display_name, &query_lower, base_style)
                     } else {
                         vec![Span::styled(
-                            format!("{}{}", indent, entry.display_name),
+                            format!("{}{}", prefix, entry.display_name),
                             base_style,
                         )]
                     };
@@ -464,12 +469,22 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
 
     if img_mgr.is_enabled() {
         for (line_idx, src, _alt) in &app.image_positions {
-            if *line_idx < scroll || *line_idx >= scroll + height {
+            let img_end = *line_idx + IMAGE_RENDER_HEIGHT;
+            if img_end <= scroll || *line_idx >= scroll + height {
                 continue;
             }
-            let row_in_view = (*line_idx - scroll) as u16;
-            let img_height = (IMAGE_RENDER_HEIGHT as u16)
-                .min(inner_with_margin.height.saturating_sub(row_in_view));
+            let (row_in_view, img_height) = if *line_idx >= scroll {
+                let row = (*line_idx - scroll) as u16;
+                let h =
+                    (IMAGE_RENDER_HEIGHT as u16).min(inner_with_margin.height.saturating_sub(row));
+                (row, h)
+            } else {
+                let scrolled_past = scroll - *line_idx;
+                let remaining = (IMAGE_RENDER_HEIGHT.saturating_sub(scrolled_past)) as u16;
+                let h = remaining.min(inner_with_margin.height);
+                (0u16, h)
+            };
+
             if img_height == 0 {
                 continue;
             }
@@ -513,7 +528,13 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Focus::Content => "Content",
     };
 
-    let scroll_pct = if app.total_lines() == 0 {
+    let scroll_pct = if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
+        if app.dir_files.is_empty() {
+            100
+        } else {
+            ((app.dir_cursor as u64 * 100) / (app.dir_files.len().max(1) as u64)).min(100) as usize
+        }
+    } else if app.total_lines() == 0 {
         100
     } else {
         ((app.scroll as u64 * 100) / (app.total_lines().max(1) as u64)).min(100) as usize
@@ -669,12 +690,14 @@ fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
         (fmt(keys.focus_next), "Focus Content"),
         (fmt(keys.toc_down), "TOC down"),
         (fmt(keys.toc_up), "TOC up"),
-        // Note: The following keybindings are currently hardcoded in main.rs and not configurable
         ("Enter".to_string(), "Jump to TOC entry"),
-        ("]".to_string(), "Next heading"),
-        ("[".to_string(), "Prev heading"),
+        (fmt(keys.next_heading), "Next heading"),
+        (fmt(keys.prev_heading), "Prev heading"),
         (fmt(keys.toggle_toc), "Toggle TOC"),
-        ("< / >".to_string(), "Narrow/Widen TOC"),
+        (
+            format!("{} / {}", fmt(keys.narrow_toc), fmt(keys.widen_toc)),
+            "Narrow/Widen TOC",
+        ),
         (fmt(keys.search), "Start search"),
         (fmt(keys.search_next), "Next search match"),
         (fmt(keys.search_prev), "Prev search match"),

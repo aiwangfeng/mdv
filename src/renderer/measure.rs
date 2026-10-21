@@ -85,7 +85,8 @@ pub(super) fn measure_node_height(node: &DocNode, width: u16) -> usize {
                 let num_len = number.unwrap_or(1).to_string().len();
                 indent_len + num_len + 2
             } else {
-                indent_len + 2
+                let bullet_char = super::LIST_BULLETS[depth % super::LIST_BULLETS.len()];
+                indent_len + display_width(bullet_char) + 1
             };
             let avail = w.saturating_sub(bullet_w).max(LIST_MIN_AVAILABLE_WIDTH);
             count_wrapped_inline_lines(children, avail).max(1)
@@ -180,7 +181,8 @@ pub(super) fn count_wrapped_inline_lines(spans: &[InlineSpan], max_width: usize)
             | InlineSpan::Bold(t)
             | InlineSpan::Italic(t)
             | InlineSpan::BoldItalic(t)
-            | InlineSpan::Strikethrough(t) => (t.as_str(), 0),
+            | InlineSpan::Strikethrough(t)
+            | InlineSpan::StyledText { text: t, .. } => (t.as_str(), 0),
             InlineSpan::Code(t) => (t.as_str(), extra_pad),
             InlineSpan::Link { text, .. } => (text.as_str(), 0),
             InlineSpan::Image { alt, .. } => (alt.as_str(), 0),

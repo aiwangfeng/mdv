@@ -47,6 +47,24 @@ pub(super) fn render_inline_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
             InlineSpan::Strikethrough(t) => {
                 result.push(Span::styled(t.clone(), Theme::strikethrough()))
             }
+            InlineSpan::StyledText {
+                text,
+                bold,
+                italic,
+                strike,
+            } => {
+                let mut style = Theme::text();
+                if *bold {
+                    style = style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                if *italic {
+                    style = style.add_modifier(ratatui::style::Modifier::ITALIC);
+                }
+                if *strike {
+                    style = style.add_modifier(ratatui::style::Modifier::CROSSED_OUT);
+                }
+                result.push(Span::styled(text.clone(), style));
+            }
             InlineSpan::Link { text, url } => {
                 log::trace!("Rendering link to URL: {}", url);
                 result.push(Span::styled(text.clone(), Theme::link()));

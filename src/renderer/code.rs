@@ -32,7 +32,7 @@ use std::rc::Rc;
 type HighlightEntry = (SyntectStyle, String);
 type HighlightRegions = Vec<HighlightEntry>;
 type CachedHighlightRegions = Rc<HighlightRegions>;
-type CacheKey = (String, u64);
+type CacheKey = (String, usize, u64);
 
 thread_local! {
     static HL_CACHE: RefCell<HighlightCache> = RefCell::new(HighlightCache::default());
@@ -97,9 +97,14 @@ pub(super) fn render_code_block(
         Span::styled(top_right_with_space, border_style),
     ]));
 
+    let theme_idx = crate::config::current_theme_index();
+    let theme_name =
+        crate::config::AVAILABLE_THEMES[theme_idx % crate::config::AVAILABLE_THEMES.len()];
+    let syntect_name = theme_name.syntect_theme_name();
+
     let mut hasher = DefaultHasher::new();
     code.hash(&mut hasher);
-    let cache_key = (lang_label.to_string(), hasher.finish());
+    let cache_key = (lang_label.to_string(), theme_idx, hasher.finish());
     let cached_regions = get_cached_regions(&cache_key);
 
     let regions_to_render: CachedHighlightRegions = if let Some(cached) = cached_regions {
@@ -110,7 +115,10 @@ pub(super) fn render_code_block(
         let syntax = ss
             .find_syntax_by_token(lang_label)
             .unwrap_or_else(|| ss.find_syntax_plain_text());
-        let theme = &ts.themes["base16-ocean.dark"];
+        let theme = ts
+            .themes
+            .get(syntect_name)
+            .unwrap_or(&ts.themes["base16-ocean.dark"]);
         let mut highlighter = HighlightLines::new(syntax, theme);
 
         let mut all_regions = Vec::new();

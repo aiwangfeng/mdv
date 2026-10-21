@@ -9,6 +9,12 @@ fn align_strings(src: &str, dst: &str) -> Vec<usize> {
     if src == dst {
         return (0..=dst.len()).collect();
     }
+    if src.is_empty() {
+        return vec![0; dst.len() + 1];
+    }
+    if dst.is_empty() {
+        return vec![src.len()];
+    }
 
     let src_chars: Vec<(usize, char)> = src.char_indices().collect();
     let dst_chars: Vec<(usize, char)> = dst.char_indices().collect();
@@ -32,11 +38,12 @@ fn align_strings(src: &str, dst: &str) -> Vec<usize> {
         return byte_map;
     }
 
-    let mut dp = vec![vec![0; m + 1]; n + 1];
-    for (i, row) in dp.iter_mut().enumerate() {
-        row[0] = i;
+    let stride = m + 1;
+    let mut dp = vec![0usize; (n + 1) * stride];
+    for i in 0..=n {
+        dp[i * stride] = i;
     }
-    for (j, val) in dp[0].iter_mut().enumerate() {
+    for (j, val) in dp[..stride].iter_mut().enumerate() {
         *val = j;
     }
 
@@ -45,9 +52,9 @@ fn align_strings(src: &str, dst: &str) -> Vec<usize> {
             let c_src = src_chars[i - 1].1;
             let c_dst = dst_chars[j - 1].1;
             let cost = if c_src == c_dst { 0 } else { 1 };
-            dp[i][j] = (dp[i - 1][j - 1] + cost)
-                .min(dp[i - 1][j] + 1)
-                .min(dp[i][j - 1] + 1);
+            dp[i * stride + j] = (dp[(i - 1) * stride + (j - 1)] + cost)
+                .min(dp[(i - 1) * stride + j] + 1)
+                .min(dp[i * stride + (j - 1)] + 1);
         }
     }
 
@@ -63,11 +70,11 @@ fn align_strings(src: &str, dst: &str) -> Vec<usize> {
             let c_dst = dst_chars[j - 1].1;
             let cost = if c_src == c_dst { 0 } else { 1 };
 
-            if dp[i][j] == dp[i - 1][j - 1] + cost {
+            if dp[i * stride + j] == dp[(i - 1) * stride + (j - 1)] + cost {
                 dst_to_src_char[j - 1] = i - 1;
                 i -= 1;
                 j -= 1;
-            } else if dp[i][j] == dp[i - 1][j] + 1 {
+            } else if dp[i * stride + j] == dp[(i - 1) * stride + j] + 1 {
                 i -= 1;
             } else {
                 dst_to_src_char[j - 1] = i.saturating_sub(1);
@@ -265,6 +272,16 @@ mod tests {
         let line = Line::from(vec![Span::raw("Hello World")]);
         let highlighted = apply_search_highlight(vec![line.clone()], "", None, 0, None, 0);
         assert_eq!(highlighted[0], line);
+    }
+
+    #[test]
+    fn test_align_strings_edge_cases() {
+        assert_eq!(align_strings("", ""), vec![0]);
+        assert_eq!(align_strings("", "abc"), vec![0, 0, 0, 0]);
+        assert_eq!(align_strings("abc", ""), vec![3]);
+        assert_eq!(align_strings("abc", "abc"), vec![0, 1, 2, 3]);
+        let map = align_strings("hello", "helo");
+        assert_eq!(map.len(), 5);
     }
 
     #[test]

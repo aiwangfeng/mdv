@@ -157,6 +157,7 @@ pub struct App {
     search_highlight_cache: HashMap<usize, Line<'static>>,
     search_highlight_order: VecDeque<usize>,
     cached_search_query: Option<String>,
+    cached_search_current: Option<usize>,
     search_dirty: bool,
     search_deadline: Option<Instant>,
     pub(crate) search_query_norm: String,
@@ -236,6 +237,7 @@ impl App {
             search_highlight_cache: HashMap::new(),
             search_highlight_order: VecDeque::new(),
             cached_search_query: None,
+            cached_search_current: None,
             search_dirty: false,
             search_deadline: None,
             search_query_norm: String::new(),
@@ -366,6 +368,8 @@ impl App {
         self.node_line_starts = result.node_line_starts;
         self.total_content_lines = result.total_content_lines;
         self.toc_line_indices = result.toc_line_indices;
+        self.scroll = self.scroll.min(self.max_scroll());
+        self.sync_toc_to_scroll();
         self.invalidate_full_render_cache();
     }
 
@@ -835,7 +839,9 @@ impl App {
     }
 
     pub fn get_cached_highlight(&mut self, line_idx: usize) -> Option<Line<'static>> {
-        if self.cached_search_query.as_ref() != Some(&self.search_query) {
+        if self.cached_search_query.as_ref() != Some(&self.search_query)
+            || self.cached_search_current != Some(self.search_current)
+        {
             return None;
         }
         if self.search_highlight_cache.contains_key(&line_idx) {
@@ -849,7 +855,13 @@ impl App {
     }
 
     pub fn cache_highlight(&mut self, line_idx: usize, line: Line<'static>) {
+        if self.cached_search_query.as_ref() != Some(&self.search_query)
+            || self.cached_search_current != Some(self.search_current)
+        {
+            self.invalidate_search_cache();
+        }
         self.cached_search_query = Some(self.search_query.clone());
+        self.cached_search_current = Some(self.search_current);
         if !self.search_highlight_cache.contains_key(&line_idx) {
             self.search_highlight_order.push_back(line_idx);
             while self.search_highlight_order.len() > MAX_SEARCH_HIGHLIGHT_CACHE {
@@ -865,6 +877,7 @@ impl App {
         self.search_highlight_cache.clear();
         self.search_highlight_order.clear();
         self.cached_search_query = None;
+        self.cached_search_current = None;
     }
 
     // ---------------------------------------------------------------------------

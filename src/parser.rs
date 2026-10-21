@@ -54,8 +54,20 @@ pub enum InlineSpan {
     BoldItalic(String),
     Code(String),
     Strikethrough(String),
-    Link { text: String, url: String },
-    Image { src: String, alt: String },
+    StyledText {
+        text: String,
+        bold: bool,
+        italic: bool,
+        strike: bool,
+    },
+    Link {
+        text: String,
+        url: String,
+    },
+    Image {
+        src: String,
+        alt: String,
+    },
     SoftBreak,
     HardBreak,
 }
@@ -182,6 +194,13 @@ fn handle_inline_event(
         Event::Text(t) => {
             if state.link_url.is_some() {
                 state.link_text.push_str(&t);
+            } else if state.strike && (state.bold || state.italic) {
+                spans.push(InlineSpan::StyledText {
+                    text: t.into_string(),
+                    bold: state.bold,
+                    italic: state.italic,
+                    strike: state.strike,
+                });
             } else if state.bold && state.italic {
                 spans.push(InlineSpan::BoldItalic(t.into_string()));
             } else if state.bold {
@@ -458,8 +477,9 @@ fn collect_table(
                 current_row.push(current_cell.trim().to_string());
                 current_cell.clear();
             }
-            Event::Text(t) => current_cell.push_str(&t),
-            Event::Code(t) => current_cell.push_str(&t),
+            Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
+                current_cell.push_str(&t)
+            }
             _ => {}
         }
     }
@@ -711,6 +731,25 @@ mod tests {
                 assert!(spans
                     .iter()
                     .any(|s| matches!(s, InlineSpan::BoldItalic(t) if t == "bold italic")));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_bold_strikethrough_combined() {
+        let document = parse("~~**bold strike**~~");
+        match &document.nodes[0] {
+            DocNode::Paragraph(spans) => {
+                assert!(spans.iter().any(|s| matches!(
+                    s,
+                    InlineSpan::StyledText {
+                        text,
+                        bold: true,
+                        strike: true,
+                        ..
+                    } if text == "bold strike"
+                )));
             }
             other => panic!("expected Paragraph, got {other:?}"),
         }

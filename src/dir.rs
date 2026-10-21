@@ -9,6 +9,7 @@ use std::time::SystemTime;
 pub struct DirEntry {
     pub path: PathBuf,
     pub display_name: String,
+    #[allow(dead_code)]
     pub depth: usize,
     pub modified: SystemTime,
 }
@@ -37,19 +38,39 @@ fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntr
     for entry in read_dir.flatten() {
         let path = entry.path();
 
-        let meta = match fs::symlink_metadata(&path) {
+        let sym_meta = match fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(_) => continue,
         };
 
-        if meta.file_type().is_symlink() {
-            continue;
-        }
+        let is_symlink = sym_meta.file_type().is_symlink();
+        let meta = if is_symlink {
+            match fs::metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            }
+        } else {
+            sym_meta
+        };
 
         if meta.is_dir() {
+            if is_symlink {
+                continue;
+            }
             if let Some(name) = path.file_name() {
                 let name_str = name.to_string_lossy();
-                if name_str.starts_with('.') || name_str == "target" {
+                if name_str.starts_with('.')
+                    || matches!(
+                        name_str.as_ref(),
+                        "target"
+                            | "node_modules"
+                            | "vendor"
+                            | "build"
+                            | "dist"
+                            | "__pycache__"
+                            | ".git"
+                    )
+                {
                     continue;
                 }
             }

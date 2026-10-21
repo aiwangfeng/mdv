@@ -61,25 +61,14 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub theme: ThemeConfig,
     pub keys: KeybindingsConfig,
-    #[serde(default)]
     pub theme_name: String,
-    #[serde(default = "default_toc_width_pct")]
     pub toc_width_pct: u16,
-    #[serde(default = "default_content_margin")]
     pub content_margin: u16,
-    #[serde(default)]
     pub cjk_width: Option<bool>,
-}
-
-fn default_toc_width_pct() -> u16 {
-    20
-}
-
-fn default_content_margin() -> u16 {
-    4
 }
 
 impl Default for Config {
@@ -115,6 +104,10 @@ pub struct KeybindingsConfig {
     pub next_theme: String,
     pub toc_up: String,
     pub toc_down: String,
+    pub next_heading: String,
+    pub prev_heading: String,
+    pub narrow_toc: String,
+    pub widen_toc: String,
 }
 
 impl Default for KeybindingsConfig {
@@ -137,6 +130,10 @@ impl Default for KeybindingsConfig {
             next_theme: "t".to_string(),
             toc_up: "K".to_string(),
             toc_down: "J".to_string(),
+            next_heading: "]".to_string(),
+            prev_heading: "[".to_string(),
+            narrow_toc: "<".to_string(),
+            widen_toc: ">".to_string(),
         }
     }
 }
@@ -229,6 +226,10 @@ pub struct ResolvedKeybindings {
     pub next_theme: KeyBinding,
     pub toc_up: KeyBinding,
     pub toc_down: KeyBinding,
+    pub next_heading: KeyBinding,
+    pub prev_heading: KeyBinding,
+    pub narrow_toc: KeyBinding,
+    pub widen_toc: KeyBinding,
 }
 
 impl Default for ThemeConfig {
@@ -478,6 +479,10 @@ impl Default for ResolvedKeybindings {
             next_theme: KeyBinding::new(KeyCode::Char('t'), KeyModifiers::empty()),
             toc_up: KeyBinding::new(KeyCode::Char('K'), KeyModifiers::empty()),
             toc_down: KeyBinding::new(KeyCode::Char('J'), KeyModifiers::empty()),
+            next_heading: KeyBinding::new(KeyCode::Char(']'), KeyModifiers::empty()),
+            prev_heading: KeyBinding::new(KeyCode::Char('['), KeyModifiers::empty()),
+            narrow_toc: KeyBinding::new(KeyCode::Char('<'), KeyModifiers::empty()),
+            widen_toc: KeyBinding::new(KeyCode::Char('>'), KeyModifiers::empty()),
         }
     }
 }
@@ -503,6 +508,10 @@ impl ResolvedKeybindings {
             next_theme: parse_key(&keys.next_theme),
             toc_up: parse_key(&keys.toc_up),
             toc_down: parse_key(&keys.toc_down),
+            next_heading: parse_key(&keys.next_heading),
+            prev_heading: parse_key(&keys.prev_heading),
+            narrow_toc: parse_key(&keys.narrow_toc),
+            widen_toc: parse_key(&keys.widen_toc),
         }
     }
 }
@@ -561,5 +570,32 @@ mod tests {
             parse_key("ctrl--"),
             KeyBinding::new(KeyCode::Char('-'), KeyModifiers::CONTROL)
         );
+    }
+
+    #[test]
+    fn parses_readme_example_config() {
+        let toml_str = r#"
+theme_name = "tokyo-night"
+
+[keys]
+quit = "q"
+down = "j"
+up = "k"
+next_theme = "t"
+"#;
+        let config: Config = toml::from_str(toml_str).expect("README example config should parse");
+        assert_eq!(config.theme_name, "tokyo-night");
+        assert_eq!(config.keys.quit, "q");
+        assert_eq!(config.keys.down, "j");
+        assert_eq!(config.keys.search, "/");
+        assert_eq!(config.toc_width_pct, 20);
+        assert_eq!(config.content_margin, 4);
+    }
+
+    #[test]
+    fn parses_empty_config() {
+        let config: Config = toml::from_str("").expect("Empty config should parse");
+        assert_eq!(config.theme_name, "");
+        assert_eq!(config.toc_width_pct, 20);
     }
 }

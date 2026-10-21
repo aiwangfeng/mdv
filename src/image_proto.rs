@@ -75,44 +75,36 @@ impl ImageManager {
     }
 
     fn resolve_safe_path(src: &str, base_dir: &Path) -> Option<PathBuf> {
-        if src.starts_with('/') {
-            let abs = PathBuf::from(src);
-            let canonical = abs.canonicalize().ok()?;
+        let candidate = if let Some(rest) = src.strip_prefix("~/") {
             let home = dirs_home()?;
-            let pwd = std::env::var("PWD").ok().map(PathBuf::from);
-            let allowed_prefixes: Vec<PathBuf> = std::iter::once(home)
-                .chain(pwd)
-                .filter_map(|p| p.canonicalize().ok())
-                .collect();
-            let allowed = allowed_prefixes.iter().any(|p| canonical.starts_with(p));
-            if !allowed {
-                log::warn!(
-                    "Rejected absolute path outside allowed directories: {}",
-                    src
-                );
-                return None;
-            }
-            Some(canonical)
-        } else if let Some(rest) = src.strip_prefix("~/") {
-            let home = dirs_home()?;
-            let resolved = home.join(rest);
-            let canonical = resolved.canonicalize().ok()?;
-            let home_canonical = home.canonicalize().ok()?;
-            if !canonical.starts_with(&home_canonical) {
-                log::warn!("Rejected path outside home directory: {}", src);
-                return None;
-            }
-            Some(canonical)
+            home.join(rest)
+        } else if let Some(stripped) = src.strip_prefix("file://") {
+            PathBuf::from(stripped)
+        } else if src.starts_with('/') {
+            PathBuf::from(src)
         } else {
-            let resolved = base_dir.join(src);
-            let canonical = resolved.canonicalize().ok()?;
-            let base_canonical = base_dir.canonicalize().ok()?;
-            if !canonical.starts_with(&base_canonical) {
-                log::warn!("Rejected path outside base directory: {}", src);
-                return None;
-            }
-            Some(canonical)
+            base_dir.join(src)
+        };
+
+        let canonical = candidate.canonicalize().ok()?;
+        if !canonical.is_file() {
+            return None;
         }
+
+        let path_str = canonical.to_string_lossy();
+        if path_str.starts_with("/etc")
+            || path_str.starts_with("/proc")
+            || path_str.starts_with("/sys")
+            || path_str.starts_with("/dev")
+        {
+            log::warn!(
+                "Rejected image path in restricted system directory: {}",
+                src
+            );
+            return None;
+        }
+
+        Some(canonical)
     }
 
     /// Dispatch a background thread to load an image.

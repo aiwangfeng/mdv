@@ -718,3 +718,36 @@ fn test_code_block_alignment_cjk() {
     let pos2 = get_bar_pos(line2);
     assert_eq!(pos1, pos2, "Vertical bars should align exactly in CJK mode");
 }
+
+#[test]
+fn test_cjk_list_item_measure_render_match() {
+    config::load().unwrap();
+    crate::width::set_cjk_width(true);
+
+    for depth in 0..=3 {
+        for width in 15..=60 {
+            for text_len in 5..=40 {
+                let text = "a".repeat(text_len);
+                let node = DocNode::ListItem {
+                    depth,
+                    ordered: false,
+                    number: None,
+                    children: vec![crate::parser::InlineSpan::Text(text)],
+                };
+
+                let measured = super::measure::measure_node_height(&node, width);
+                let rendered = render_nodes(std::slice::from_ref(&node), width, width)
+                    .lines
+                    .len();
+
+                assert_eq!(
+                    measured, rendered,
+                    "depth {}, width {}, text_len {}: measured={}, rendered={}",
+                    depth, width, text_len, measured, rendered
+                );
+            }
+        }
+    }
+
+    crate::width::set_cjk_width(false);
+}

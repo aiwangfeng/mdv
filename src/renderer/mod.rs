@@ -54,7 +54,7 @@ const TABLE_CELL_PADDING_TOTAL: usize = TABLE_CELL_PADDING * 2;
 const TABLE_MIN_COL_WIDTH: usize = 3;
 
 const LIST_INDENT_PER_DEPTH: usize = 2;
-const LIST_BULLETS: [&str; 4] = ["•", "◦", "▸", "▹"];
+pub(super) const LIST_BULLETS: [&str; 4] = ["•", "◦", "▸", "▹"];
 const LIST_MIN_AVAILABLE_WIDTH: usize = 10;
 
 const INLINE_CODE_PADDING: usize = 1;

@@ -28,6 +28,7 @@ use clap::Parser as ClapParser;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -42,6 +43,7 @@ enum AppEvent {
         code: KeyCode,
         modifiers: KeyModifiers,
     },
+    Mouse(MouseEvent),
     Resize(u16, u16),
     InputClosed,
 }
@@ -80,7 +82,9 @@ fn get_base_dir(file_path: &Path) -> &Path {
 }
 
 fn load_visible_images(app: &App, img_mgr: &mut ImageManager) {
-    if !img_mgr.is_enabled() || app.directory_mode {
+    if !img_mgr.is_enabled()
+        || (app.directory_mode && app.dir_view == crate::app::DirView::FileList)
+    {
         return;
     }
 
@@ -158,6 +162,15 @@ fn main() -> Result<()> {
     let mut img_mgr = ImageManager::new(cli.no_images);
 
     // ── Terminal setup ───────────────────────────────────────────────────────
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ =
+            Terminal::new(CrosstermBackend::new(io::stdout())).and_then(|mut t| t.show_cursor());
+        original_hook(panic_info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -205,7 +218,7 @@ fn run(
     let size = terminal.size()?;
     let mut terminal_size = ratatui::layout::Rect::new(0, 0, size.width, size.height);
     ui::calculate_layout(app, terminal_size);
-    let mut last_render_width = app.content_width;
+    let mut last_render_width = 0;
 
     loop {
         if let Some(deadline) = resize_deadline {
@@ -307,6 +320,11 @@ fn spawn_input_thread(tx: mpsc::Sender<AppEvent>, stop: Arc<AtomicBool>) -> thre
                             break;
                         }
                     }
+                    Ok(Event::Mouse(mouse)) => {
+                        if tx.send(AppEvent::Mouse(mouse)).is_err() {
+                            break;
+                        }
+                    }
                     Ok(Event::Resize(w, h)) => {
                         if tx.send(AppEvent::Resize(w, h)).is_err() {
                             break;
@@ -336,11 +354,48 @@ fn handle_app_event(app: &mut App, event: AppEvent) -> bool {
             }
             handle_key(app, code, modifiers)
         }
+        AppEvent::Mouse(mouse) => handle_mouse_event(app, mouse),
         AppEvent::Resize(_, _) => false,
         AppEvent::InputClosed => {
             app.quit = true;
             false
         }
+    }
+}
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> bool {
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
+                let before = (app.dir_cursor, app.dir_scroll);
+                app.dir_down();
+                before != (app.dir_cursor, app.dir_scroll)
+            } else if app.focus == Focus::Toc {
+                let before = (app.toc_cursor, app.toc_scroll);
+                app.toc_down();
+                before != (app.toc_cursor, app.toc_scroll)
+            } else {
+                let before = app.scroll;
+                app.scroll_down(3);
+                before != app.scroll
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
+                let before = (app.dir_cursor, app.dir_scroll);
+                app.dir_up();
+                before != (app.dir_cursor, app.dir_scroll)
+            } else if app.focus == Focus::Toc {
+                let before = (app.toc_cursor, app.toc_scroll);
+                app.toc_up();
+                before != (app.toc_cursor, app.toc_scroll)
+            } else {
+                let before = app.scroll;
+                app.scroll_up(3);
+                before != app.scroll
+            }
+        }
+        _ => false,
     }
 }
 
@@ -394,6 +449,14 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
                 KeyCode::Enter if modifiers.is_empty() => {
                     let cursor = app.dir_cursor;
                     return app.open_file_from_dir(cursor);
+                }
+                KeyCode::Esc if modifiers.is_empty() && app.dir_search_active => {
+                    app.dir_search_active = false;
+                    app.search_query.clear();
+                    app.search_matches.clear();
+                    app.search_current = 0;
+                    app.dir_search_cursor = 0;
+                    return true;
                 }
                 c if keys.search.matches(c, modifiers) => {
                     app.start_dir_search();
@@ -457,11 +520,11 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
             app.open_theme_picker(config::current_theme_index());
             true
         }
-        KeyCode::Char('<') if modifiers.is_empty() => {
+        c if keys.narrow_toc.matches(c, modifiers) => {
             app.narrow_toc();
             true
         }
-        KeyCode::Char('>') if modifiers.is_empty() => {
+        c if keys.widen_toc.matches(c, modifiers) => {
             app.widen_toc();
             true
         }
@@ -522,12 +585,12 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
             true
         }
 
-        KeyCode::Char(']') if modifiers.is_empty() => {
+        c if keys.next_heading.matches(c, modifiers) => {
             let before = app.scroll;
             app.next_heading();
             before != app.scroll
         }
-        KeyCode::Char('[') if modifiers.is_empty() => {
+        c if keys.prev_heading.matches(c, modifiers) => {
             let before = app.scroll;
             app.prev_heading();
             before != app.scroll
