@@ -395,7 +395,23 @@ fn collect_list_items(
                     match item_event {
                         Event::End(TagEnd::Item) => break,
                         Event::Start(Tag::Paragraph) => {
+                            if !spans.is_empty() {
+                                spans.push(InlineSpan::SoftBreak);
+                            }
                             collect_inline_spans(events, &mut spans, TagEnd::Paragraph);
+                        }
+                        Event::Start(Tag::CodeBlock(kind)) => {
+                            let _language = extract_language(&kind);
+                            let code = extract_code_content(events);
+                            if !spans.is_empty() {
+                                spans.push(InlineSpan::HardBreak);
+                            }
+                            for (idx, line) in code.lines().enumerate() {
+                                if idx > 0 {
+                                    spans.push(InlineSpan::HardBreak);
+                                }
+                                spans.push(InlineSpan::Code(line.to_string()));
+                            }
                         }
                         Event::Start(Tag::List(start)) => {
                             if !spans.is_empty() {
@@ -884,6 +900,29 @@ mod tests {
                 assert_eq!(spans[3], InlineSpan::Text("</span>".to_string()));
             }
             other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_loose_list_and_code_block_in_list() {
+        let md = "- Item text\n\n  ```rust\n  let x = 42;\n  ```\n";
+        let doc = parse(md);
+        let list_item = doc
+            .nodes
+            .iter()
+            .find(|n| matches!(n, DocNode::ListItem { .. }))
+            .expect("should find list item");
+        if let DocNode::ListItem { children, .. } = list_item {
+            let has_code = children
+                .iter()
+                .any(|c| matches!(c, InlineSpan::Code(s) if s.contains("let x = 42;")));
+            assert!(
+                has_code,
+                "List item should contain code span: {:?}",
+                children
+            );
+        } else {
+            panic!("Expected ListItem");
         }
     }
 }

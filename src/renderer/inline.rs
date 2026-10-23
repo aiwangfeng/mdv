@@ -25,6 +25,15 @@ pub(super) fn heading_prefix(level: u8) -> &'static str {
 // Inline span rendering
 // ---------------------------------------------------------------------------
 
+pub(super) fn format_inline_image_text(alt: &str, src: &str) -> String {
+    let label = if alt.is_empty() { src } else { alt };
+    let mut s = String::with_capacity(label.len() + 10);
+    s.push_str("[image: ");
+    s.push_str(label);
+    s.push(']');
+    s
+}
+
 pub(super) fn render_inline_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
     let mut result = Vec::with_capacity(spans.len());
     for span in spans {
@@ -70,11 +79,7 @@ pub(super) fn render_inline_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
                 result.push(Span::styled(text.clone(), Theme::link()));
             }
             InlineSpan::Image { src, alt } => {
-                let label = if alt.is_empty() { src } else { alt };
-                let mut s = String::with_capacity(label.len() + 10);
-                s.push_str("[image: ");
-                s.push_str(label);
-                s.push(']');
+                let s = format_inline_image_text(alt, src);
                 result.push(Span::styled(s, Theme::subtext()));
             }
             InlineSpan::SoftBreak => result.push(Span::raw(" ")),

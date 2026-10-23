@@ -751,3 +751,108 @@ fn test_cjk_list_item_measure_render_match() {
 
     crate::width::set_cjk_width(false);
 }
+
+#[test]
+fn test_inline_image_measure_render_match() {
+    use crate::parser::InlineSpan;
+    config::load().unwrap();
+    let cases = vec![
+        InlineSpan::Image {
+            src: "https://example.com/a.png".to_string(),
+            alt: "".to_string(),
+        },
+        InlineSpan::Image {
+            src: "https://example.com/long_path_to_some_image_asset_file.png".to_string(),
+            alt: "Alt text".to_string(),
+        },
+    ];
+
+    for img in cases {
+        let node = DocNode::Paragraph(vec![
+            InlineSpan::Text("Prefix text before image ".to_string()),
+            img,
+            InlineSpan::Text(" and trailing text after image.".to_string()),
+        ]);
+
+        for width in 15..=100 {
+            let measured = super::measure::measure_node_height(&node, width);
+            let rendered = render_nodes(std::slice::from_ref(&node), width, width)
+                .lines
+                .len();
+            assert_eq!(
+                measured, rendered,
+                "width {}: measured={}, rendered={}",
+                width, measured, rendered
+            );
+        }
+    }
+}
+
+#[test]
+fn test_code_block_tabs_expansion_and_measure_match() {
+    config::load().unwrap();
+    let code_with_tabs = "fn main() {\n\tlet a = 1;\n\t\tlet b = 2;\n}";
+    let node = DocNode::CodeBlock {
+        language: Some("rust".to_string()),
+        code: code_with_tabs.to_string(),
+    };
+
+    for width in 20..=80 {
+        let measured = super::measure::measure_node_height(&node, width);
+        let result = render_nodes(std::slice::from_ref(&node), width, width);
+        assert_eq!(
+            measured,
+            result.lines.len(),
+            "width {}: measured={}, rendered={}",
+            width,
+            measured,
+            result.lines.len()
+        );
+
+        // Verify borders: no line should contain raw '\t'
+        for line in &result.lines {
+            for span in &line.spans {
+                assert!(
+                    !span.content.contains('\t'),
+                    "Rendered span should not contain raw tab: {:?}",
+                    span.content
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_table_narrow_width_no_panic_or_huge_overflow() {
+    config::load().unwrap();
+    let headers = vec![
+        "Col 1".to_string(),
+        "Column Two".to_string(),
+        "Third".to_string(),
+        "Fourth Column With Long Name".to_string(),
+    ];
+    let rows = vec![
+        vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ],
+        vec![
+            "Long text 1".to_string(),
+            "Long text 2".to_string(),
+            "Long text 3".to_string(),
+            "Long text 4".to_string(),
+        ],
+    ];
+    let node = DocNode::Table { headers, rows };
+
+    for width in 15..=100 {
+        let result = render_nodes(std::slice::from_ref(&node), width, width);
+        assert!(
+            !result.lines.is_empty(),
+            "Table should render lines at width {}",
+            width
+        );
+    }
+}

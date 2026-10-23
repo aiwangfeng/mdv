@@ -510,8 +510,12 @@ impl App {
         if self.toc_line_indices.is_empty() || self.toc_cursor >= self.toc_line_indices.len() {
             return;
         }
-        let line = self.toc_line_indices[self.toc_cursor];
-        self.scroll_to(line);
+        let target_cursor = self.toc_cursor;
+        let line = self.toc_line_indices[target_cursor];
+        self.scroll = line.min(self.max_scroll());
+        self.mark_viewport_dirty();
+        self.toc_cursor = target_cursor;
+        self.ensure_toc_cursor_visible();
     }
 
     fn ensure_toc_cursor_visible(&mut self) {
@@ -525,6 +529,16 @@ impl App {
     fn sync_toc_to_scroll(&mut self) {
         if self.toc_line_indices.is_empty() {
             return;
+        }
+
+        // If scroll is at or past max_scroll and the current toc_cursor is already within
+        // the visible viewport range, do not snap cursor backwards.
+        if self.scroll >= self.max_scroll() && self.toc_cursor < self.toc_line_indices.len() {
+            let cursor_line = self.toc_line_indices[self.toc_cursor];
+            let visible_end = self.scroll + (self.content_height as usize).max(1);
+            if cursor_line >= self.scroll && cursor_line < visible_end {
+                return;
+            }
         }
 
         let idx = match self.toc_line_indices.binary_search(&self.scroll) {
@@ -548,7 +562,10 @@ impl App {
             .toc_line_indices
             .partition_point(|&line| line <= self.scroll);
         if let Some(&line) = self.toc_line_indices.get(idx) {
-            self.scroll_to(line);
+            self.scroll = line.min(self.max_scroll());
+            self.mark_viewport_dirty();
+            self.toc_cursor = idx;
+            self.ensure_toc_cursor_visible();
         }
     }
 
@@ -561,7 +578,11 @@ impl App {
             .checked_sub(1)
             .and_then(|i| self.toc_line_indices.get(i))
         {
-            self.scroll_to(line);
+            let target_idx = idx - 1;
+            self.scroll = line.min(self.max_scroll());
+            self.mark_viewport_dirty();
+            self.toc_cursor = target_idx;
+            self.ensure_toc_cursor_visible();
         }
     }
 
@@ -1242,5 +1263,67 @@ mod tests {
         assert_eq!(app.toc_line_indices, vec![0, 2]);
         app.scroll_to(2);
         assert_eq!(app.synced_toc_index(), Some(1));
+    }
+
+    #[test]
+    fn toc_jump_to_cursor_does_not_snap_back_at_bottom() {
+        let document = Document {
+            nodes: vec![
+                DocNode::Heading {
+                    level: 1,
+                    text: "H1".to_string(),
+                },
+                DocNode::Heading {
+                    level: 2,
+                    text: "H2".to_string(),
+                },
+                DocNode::Heading {
+                    level: 3,
+                    text: "H3".to_string(),
+                },
+            ],
+            toc: vec![
+                TocEntry {
+                    level: 1,
+                    title: "H1".to_string(),
+                    node_index: 0,
+                },
+                TocEntry {
+                    level: 2,
+                    title: "H2".to_string(),
+                    node_index: 1,
+                },
+                TocEntry {
+                    level: 3,
+                    title: "H3".to_string(),
+                    node_index: 2,
+                },
+            ],
+        };
+
+        // Heights: H1 at 0, H2 at 30, H3 at 45. Total lines = 50.
+        let node_heights = vec![30usize, 15, 5];
+        let node_line_starts = vec![0usize, 30, 45];
+        let total_lines = 50;
+
+        let mut app = App::new(
+            PathBuf::from("doc.md"),
+            document,
+            node_heights,
+            node_line_starts,
+            total_lines,
+            vec![],
+            vec![0, 30, 45],
+        );
+        app.content_height = 20;
+        // max_scroll = 50 - 20 = 30.
+        // H3 is at line 45 > max_scroll.
+        app.toc_cursor = 2; // Selected H3
+        app.toc_jump_to_cursor();
+
+        // Scroll should be clamped to max_scroll (30)
+        assert_eq!(app.scroll, 30);
+        // Crucial: toc_cursor MUST remain 2 (H3), not snapped back to 1 (H2)!
+        assert_eq!(app.toc_cursor, 2);
     }
 }

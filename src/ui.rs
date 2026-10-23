@@ -717,12 +717,17 @@ fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
     let left_items = &items[..half];
     let right_items = &items[half..];
 
-    let help_height = 4 + half.max(right_items.len()) as u16;
-    let help_width = ((col_width * 2 + 12) as u16)
-        .min(area.width.saturating_sub(4))
-        .max(50);
-    let x = area.width.saturating_sub(help_width) / 2;
-    let y = area.height.saturating_sub(help_height) / 2;
+    let help_height = (4 + half.max(right_items.len()) as u16).min(area.height);
+    let target_width = (col_width * 2 + 12) as u16;
+    let help_width = target_width
+        .min(area.width.saturating_sub(2))
+        .max(20.min(area.width))
+        .min(area.width);
+    if help_width < 10 || help_height < 3 {
+        return;
+    }
+    let x = area.x + area.width.saturating_sub(help_width) / 2;
+    let y = area.y + area.height.saturating_sub(help_height) / 2;
     let help_area = Rect {
         x,
         y,
@@ -792,14 +797,20 @@ fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
 }
 
 fn draw_theme_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width < 10 || area.height < 4 {
+        return;
+    }
     let keys = &config::get().keys;
     let helper_text = format!(
         "{}/{} or ↑/↓ move   Enter confirm   Esc/{}/{} cancel",
         keys.down, keys.up, keys.next_theme, keys.quit
     );
     let min_width = crate::width::str_width(&helper_text) as u16 + 4;
-    let width = area.width.min(min_width.max(30));
-    let height = area.height.clamp(9, 12);
+    let width = min_width
+        .min(area.width.saturating_sub(2))
+        .max(20.min(area.width))
+        .min(area.width);
+    let height = area.height.min(12);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let overlay_area = Rect {
@@ -819,8 +830,16 @@ fn draw_theme_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
 
-    let [list_area, hint_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(inner);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let (list_area, hint_area) = if inner.height >= 4 {
+        let [l, h] = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(inner);
+        (l, Some(h))
+    } else {
+        (inner, None)
+    };
 
     let items: Vec<ListItem> = config::AVAILABLE_THEMES
         .iter()
@@ -848,26 +867,28 @@ fn draw_theme_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let list = List::new(items).highlight_style(Theme::toc_selected());
     frame.render_stateful_widget(list, list_area, &mut state);
 
-    let hint = Paragraph::new(Text::from(vec![
-        Line::from(Span::styled(
-            "Preview updates as you move",
-            Theme::subtext(),
-        )),
-        Line::from(vec![
-            Span::styled(format!("{}/{}", keys.down, keys.up), Theme::statusbar_key()),
-            Span::styled(" or ", Theme::subtext()),
-            Span::styled("↑/↓", Theme::statusbar_key()),
-            Span::styled(" move   ", Theme::subtext()),
-            Span::styled("Enter", Theme::statusbar_key()),
-            Span::styled(" confirm   ", Theme::subtext()),
-            Span::styled(
-                format!("Esc/{}/{}", keys.next_theme, keys.quit),
-                Theme::statusbar_key(),
-            ),
-            Span::styled(" cancel", Theme::subtext()),
-        ]),
-    ]));
-    frame.render_widget(hint, hint_area);
+    if let Some(hint_area) = hint_area {
+        let hint = Paragraph::new(Text::from(vec![
+            Line::from(Span::styled(
+                "Preview updates as you move",
+                Theme::subtext(),
+            )),
+            Line::from(vec![
+                Span::styled(format!("{}/{}", keys.down, keys.up), Theme::statusbar_key()),
+                Span::styled(" or ", Theme::subtext()),
+                Span::styled("↑/↓", Theme::statusbar_key()),
+                Span::styled(" move   ", Theme::subtext()),
+                Span::styled("Enter", Theme::statusbar_key()),
+                Span::styled(" confirm   ", Theme::subtext()),
+                Span::styled(
+                    format!("Esc/{}/{}", keys.next_theme, keys.quit),
+                    Theme::statusbar_key(),
+                ),
+                Span::styled(" cancel", Theme::subtext()),
+            ]),
+        ]));
+        frame.render_widget(hint, hint_area);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -875,17 +896,21 @@ fn draw_theme_overlay(frame: &mut Frame, app: &App, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn draw_toast(frame: &mut Frame, toast: &crate::app::Toast, area: Rect) {
+    if area.width < 8 || area.height < 3 {
+        return;
+    }
     let width = (crate::width::str_width(&toast.message) as u16 + 6)
         .min(area.width.saturating_sub(4))
-        .max(20);
-    let height = 3;
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = area.height.saturating_sub(height + 3).max(area.y);
+        .max(10.min(area.width))
+        .min(area.width);
+    let height = 3.min(area.height);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + area.height.saturating_sub(height + 3);
     let toast_area = Rect {
         x,
         y,
-        width: width.min(area.width),
-        height: height.min(area.height),
+        width,
+        height,
     };
 
     frame.render_widget(Clear, toast_area);
@@ -911,10 +936,13 @@ fn draw_toast(frame: &mut Frame, toast: &crate::app::Toast, area: Rect) {
 
 fn draw_first_run_hint(frame: &mut Frame, area: Rect) {
     let hint = "? for help";
-    let width = crate::width::str_width(hint) as u16 + 4;
-    let height = 1;
-    let x = area.width.saturating_sub(width + 1);
-    let y = area.height.saturating_sub(height + 2);
+    let width = (crate::width::str_width(hint) as u16 + 4).min(area.width);
+    let height = 1.min(area.height);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let x = area.x + area.width.saturating_sub(width + 1);
+    let y = area.y + area.height.saturating_sub(height + 2);
     let hint_area = Rect {
         x,
         y,
@@ -924,4 +952,53 @@ fn draw_first_run_hint(frame: &mut Frame, area: Rect) {
 
     let para = Paragraph::new(Text::from(Span::styled(hint, Theme::subtext())));
     frame.render_widget(para, hint_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_small_terminal_overlays_no_panic() {
+        config::load().unwrap();
+        let app = App::new(
+            PathBuf::from("test.md"),
+            crate::parser::Document {
+                nodes: vec![],
+                toc: vec![],
+            },
+            vec![],
+            vec![],
+            0,
+            vec![],
+            vec![],
+        );
+
+        let small_sizes = vec![
+            (20, 5),
+            (30, 8),
+            (40, 10),
+            (50, 6),
+            (80, 7),
+            (10, 3),
+            (5, 2),
+        ];
+
+        for (w, h) in small_sizes {
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    draw_help_overlay(f, &app, area);
+                    draw_theme_overlay(f, &app, area);
+                    draw_first_run_hint(f, area);
+                })
+                .expect("Draw on small terminal should never panic");
+        }
+    }
 }

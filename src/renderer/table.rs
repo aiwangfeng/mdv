@@ -59,8 +59,8 @@ pub(super) fn render_table(
             Theme::table_row_odd()
         };
         let mut row_spans = vec![Span::styled(TABLE_VERTICAL_BORDER, border)];
-        for (i, cell) in row.iter().enumerate() {
-            let w = col_widths.get(i).copied().unwrap_or(TABLE_MIN_COL_WIDTH);
+        for (i, cell) in row.iter().take(ncols).enumerate() {
+            let w = col_widths[i];
             let content = truncate_text(cell, w);
             let content_width = display_width(&content);
             row_spans.push(Span::styled(
@@ -115,8 +115,22 @@ fn compute_col_widths(
     }
 
     if avail < ncols * TABLE_MIN_COL_WIDTH {
-        let equal = (avail / ncols).max(TABLE_MIN_COL_WIDTH);
-        return vec![equal; ncols];
+        let equal = (avail / ncols).clamp(1, TABLE_MIN_COL_WIDTH);
+        let mut widths = vec![equal; ncols];
+        let total: usize = widths.iter().sum();
+        if total > avail {
+            let mut diff = total - avail;
+            for w in widths.iter_mut() {
+                if diff == 0 {
+                    break;
+                }
+                if *w > 1 {
+                    *w -= 1;
+                    diff -= 1;
+                }
+            }
+        }
+        return widths;
     }
 
     let mut widths = natural_widths.clone();
@@ -143,7 +157,7 @@ fn compute_col_widths(
         let remaining = total_after - avail;
         for i in 0..remaining {
             let idx = i % ncols;
-            widths[idx] = widths[idx].saturating_sub(1).max(TABLE_MIN_COL_WIDTH);
+            widths[idx] = widths[idx].saturating_sub(1).max(1);
         }
     }
 

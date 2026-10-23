@@ -39,6 +39,14 @@ pub(super) fn measure_node_height(node: &DocNode, width: u16) -> usize {
             let right_border = display_width(super::CODE_BLOCK_RIGHT_BORDER);
             let max_content_width = w.saturating_sub(left_border + right_border);
 
+            let expanded_code_storage;
+            let code = if code.contains('\t') {
+                expanded_code_storage = super::code::expand_tabs(code, 4);
+                &expanded_code_storage
+            } else {
+                code
+            };
+
             let mut line_count: usize = 0;
             for line in code.split('\n') {
                 // If it's the last empty split (due to trailing newline), skip if code ended with \n
@@ -174,8 +182,10 @@ pub(super) fn count_wrapped_inline_lines(spans: &[InlineSpan], max_width: usize)
     let mut lines = 1usize;
     let mut current_width = 0usize;
     let extra_pad = 2 * INLINE_CODE_PADDING;
+    let mut image_buf = String::new();
 
     for span in spans {
+        image_buf.clear();
         let (text, extra) = match span {
             InlineSpan::Text(t)
             | InlineSpan::Bold(t)
@@ -185,7 +195,10 @@ pub(super) fn count_wrapped_inline_lines(spans: &[InlineSpan], max_width: usize)
             | InlineSpan::StyledText { text: t, .. } => (t.as_str(), 0),
             InlineSpan::Code(t) => (t.as_str(), extra_pad),
             InlineSpan::Link { text, .. } => (text.as_str(), 0),
-            InlineSpan::Image { alt, .. } => (alt.as_str(), 0),
+            InlineSpan::Image { src, alt } => {
+                image_buf = super::inline::format_inline_image_text(alt, src);
+                (image_buf.as_str(), 0)
+            }
             InlineSpan::SoftBreak => {
                 simulate_push_word_with_extra(&mut lines, &mut current_width, " ", 0, max_width);
                 continue;

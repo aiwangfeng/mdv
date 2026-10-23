@@ -40,8 +40,8 @@ thread_local! {
 
 #[derive(Default)]
 struct HighlightCache {
-    map: std::collections::HashMap<CacheKey, CachedHighlightRegions>,
-    order: std::collections::VecDeque<CacheKey>,
+    map: std::collections::HashMap<CacheKey, (CachedHighlightRegions, u64)>,
+    access_counter: u64,
 }
 
 fn get_syntax_set() -> &'static SyntaxSet {
@@ -53,25 +53,69 @@ fn get_theme_set() -> &'static ThemeSet {
 }
 
 fn get_cached_regions(cache_key: &CacheKey) -> Option<CachedHighlightRegions> {
-    HL_CACHE.with(|cache| cache.borrow().map.get(cache_key).cloned())
+    HL_CACHE.with(|cache| {
+        let mut c = cache.borrow_mut();
+        c.access_counter += 1;
+        let counter = c.access_counter;
+        if let Some((regions, access)) = c.map.get_mut(cache_key) {
+            *access = counter;
+            Some(Rc::clone(regions))
+        } else {
+            None
+        }
+    })
 }
 
 fn cache_regions(cache_key: CacheKey, regions: CachedHighlightRegions) {
     HL_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.map.contains_key(&cache_key) {
-            cache.order.retain(|k| k != &cache_key);
-            cache.order.push_back(cache_key.clone());
-        } else {
-            cache.order.push_back(cache_key.clone());
-            while cache.order.len() > MAX_HL_CACHE {
-                if let Some(evicted) = cache.order.pop_front() {
-                    cache.map.remove(&evicted);
-                }
+        let mut c = cache.borrow_mut();
+        c.access_counter += 1;
+        let counter = c.access_counter;
+        c.map.insert(cache_key, (regions, counter));
+        if c.map.len() > MAX_HL_CACHE {
+            if let Some(oldest_key) = c
+                .map
+                .iter()
+                .min_by_key(|(_, (_, access))| *access)
+                .map(|(k, _)| k.clone())
+            {
+                c.map.remove(&oldest_key);
             }
         }
-        cache.map.insert(cache_key, regions);
     });
+}
+
+pub(crate) fn expand_tabs(s: &str, tab_size: usize) -> String {
+    if !s.contains('\t') {
+        return s.to_string();
+    }
+    let tab_size = tab_size.max(1);
+    let mut result = String::with_capacity(s.len() + 16);
+    let mut col = 0;
+    for c in s.chars() {
+        match c {
+            '\t' => {
+                let spaces = tab_size - (col % tab_size);
+                for _ in 0..spaces {
+                    result.push(' ');
+                }
+                col += spaces;
+            }
+            '\n' => {
+                result.push('\n');
+                col = 0;
+            }
+            '\r' => {
+                result.push('\r');
+            }
+            c => {
+                let w = crate::width::char_width(c);
+                result.push(c);
+                col += w;
+            }
+        }
+    }
+    result
 }
 
 pub(super) fn render_code_block(
@@ -80,6 +124,14 @@ pub(super) fn render_code_block(
     code: &str,
     width: usize,
 ) {
+    let expanded_code_storage;
+    let code = if code.contains('\t') {
+        expanded_code_storage = expand_tabs(code, 4);
+        &expanded_code_storage
+    } else {
+        code
+    };
+
     let border_style = Theme::code_block_border();
     let lang_label = language.unwrap_or("text");
     let lang_label_width = display_width(lang_label);
