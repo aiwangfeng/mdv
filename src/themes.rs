@@ -188,7 +188,7 @@ impl std::str::FromStr for ThemeName {
             "gruvbox" | "gruvbox-dark" | "gruvbox_dark" | "gruvboxdark" => Ok(Self::GruvboxDark),
             "tokyonight" | "tokyo-night" | "tokyo_night" => Ok(Self::TokyoNight),
             "one-dark" | "one_dark" | "onedark" => Ok(Self::OneDark),
-            _ => Err(format!("Unknown theme: {}", s)),
+            _ => Err(format!("Unknown theme: {s}")),
         }
     }
 }
@@ -211,10 +211,8 @@ impl ThemeName {
     pub fn syntect_theme_name(self) -> &'static str {
         match self {
             Self::CatppuccinMocha => "base16-mocha.dark",
-            Self::Nord => "base16-ocean.dark",
             Self::GruvboxDark => "base16-eighties.dark",
-            Self::TokyoNight => "base16-ocean.dark",
-            Self::OneDark => "base16-ocean.dark",
+            Self::Nord | Self::TokyoNight | Self::OneDark => "base16-ocean.dark",
         }
     }
 }

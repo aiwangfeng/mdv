@@ -86,7 +86,7 @@ fn cache_regions(cache_key: CacheKey, regions: CachedHighlightRegions) {
 }
 
 pub(crate) fn expand_tabs(s: &str, tab_size: usize) -> String {
-    if !s.contains('\t') {
+    if !s.contains(['\t', '\r']) {
         return s.to_string();
     }
     let tab_size = tab_size.max(1);
@@ -105,9 +105,7 @@ pub(crate) fn expand_tabs(s: &str, tab_size: usize) -> String {
                 result.push('\n');
                 col = 0;
             }
-            '\r' => {
-                result.push('\r');
-            }
+            '\r' => {}
             c => {
                 let w = crate::width::char_width(c);
                 result.push(c);
@@ -125,7 +123,7 @@ pub(super) fn render_code_block(
     width: usize,
 ) {
     let expanded_code_storage;
-    let code = if code.contains('\t') {
+    let code = if code.contains(['\t', '\r']) {
         expanded_code_storage = expand_tabs(code, 4);
         &expanded_code_storage
     } else {
@@ -133,19 +131,25 @@ pub(super) fn render_code_block(
     };
 
     let border_style = Theme::code_block_border();
-    let lang_label = language.unwrap_or("text");
-    let lang_label_width = display_width(lang_label);
-
-    let top_border_width = display_width(CODE_BLOCK_TOP_LEFT)
-        + lang_label_width
+    let raw_lang = language.unwrap_or("text");
+    let fixed_top_overhead = display_width(CODE_BLOCK_TOP_LEFT)
         + CODE_BLOCK_SPACE_BEFORE_DASHES
         + display_width(CODE_BLOCK_TOP_RIGHT);
+    let max_lang_width = width.saturating_sub(fixed_top_overhead);
+    let lang_label = if display_width(raw_lang) > max_lang_width {
+        super::table::truncate_text(raw_lang, max_lang_width)
+    } else {
+        raw_lang.to_string()
+    };
+    let lang_label_width = display_width(&lang_label);
+
+    let top_border_width = fixed_top_overhead + lang_label_width;
     let top_right_len = width.saturating_sub(top_border_width);
     let top_right = "─".repeat(top_right_len);
-    let top_right_with_space = format!(" {}{}", top_right, CODE_BLOCK_TOP_RIGHT);
+    let top_right_with_space = format!(" {top_right}{CODE_BLOCK_TOP_RIGHT}");
     lines.push(Line::from(vec![
         Span::styled(CODE_BLOCK_TOP_LEFT, border_style),
-        Span::styled(lang_label.to_string(), Theme::code_block_lang()),
+        Span::styled(lang_label.clone(), Theme::code_block_lang()),
         Span::styled(top_right_with_space, border_style),
     ]));
 
@@ -156,7 +160,8 @@ pub(super) fn render_code_block(
 
     let mut hasher = DefaultHasher::new();
     code.hash(&mut hasher);
-    let cache_key = (lang_label.to_string(), theme_idx, hasher.finish());
+    let lookup_lang = language.unwrap_or("text");
+    let cache_key = (lookup_lang.to_string(), theme_idx, hasher.finish());
     let cached_regions = get_cached_regions(&cache_key);
 
     let regions_to_render: CachedHighlightRegions = if let Some(cached) = cached_regions {
@@ -165,7 +170,7 @@ pub(super) fn render_code_block(
         let ss = get_syntax_set();
         let ts = get_theme_set();
         let syntax = ss
-            .find_syntax_by_token(lang_label)
+            .find_syntax_by_token(lookup_lang)
             .unwrap_or_else(|| ss.find_syntax_plain_text());
         let theme = ts
             .themes
@@ -180,10 +185,7 @@ pub(super) fn render_code_block(
                     all_regions.extend(regions.into_iter().map(|(s, t)| (s, t.to_string())));
                 }
                 Err(_) => {
-                    all_regions.push((
-                        SyntectStyle::default(),
-                        line_str.trim_end_matches('\n').to_string(),
-                    ));
+                    all_regions.push((SyntectStyle::default(), line_str.to_string()));
                 }
             }
         }
@@ -196,14 +198,16 @@ pub(super) fn render_code_block(
     let mut current_line_spans: Vec<Span<'static>> =
         vec![Span::styled(CODE_BLOCK_LEFT_BORDER, border_style)];
     let mut current_line_content_width: usize = 0;
-    let max_content_width = width.saturating_sub(
-        display_width(CODE_BLOCK_LEFT_BORDER) + display_width(CODE_BLOCK_RIGHT_BORDER),
-    );
+    let max_content_width = width
+        .saturating_sub(
+            display_width(CODE_BLOCK_LEFT_BORDER) + display_width(CODE_BLOCK_RIGHT_BORDER),
+        )
+        .max(1);
 
     for (style, text) in regions_to_render.iter() {
         let is_newline = text.ends_with('\n');
         let text = if is_newline {
-            text.trim_end_matches('\n')
+            text.trim_end_matches(['\r', '\n'])
         } else {
             text
         };
@@ -229,7 +233,9 @@ pub(super) fn render_code_block(
             for c in text.chars() {
                 let c_width = crate::width::char_width(c);
 
-                if current_line_content_width + c_width > max_content_width {
+                if current_line_content_width > 0
+                    && current_line_content_width + c_width > max_content_width
+                {
                     if !current_chunk.is_empty() {
                         current_line_spans
                             .push(Span::styled(std::mem::take(&mut current_chunk), s));
@@ -281,10 +287,7 @@ pub(super) fn render_code_block(
         display_width(CODE_BLOCK_BOTTOM_LEFT) + display_width(CODE_BLOCK_BOTTOM_RIGHT),
     ));
     lines.push(Line::from(vec![Span::styled(
-        format!(
-            "{}{}{}",
-            CODE_BLOCK_BOTTOM_LEFT, bot, CODE_BLOCK_BOTTOM_RIGHT
-        ),
+        format!("{CODE_BLOCK_BOTTOM_LEFT}{bot}{CODE_BLOCK_BOTTOM_RIGHT}"),
         border_style,
     )]));
 }

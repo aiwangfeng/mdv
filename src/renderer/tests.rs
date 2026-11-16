@@ -851,8 +851,48 @@ fn test_table_narrow_width_no_panic_or_huge_overflow() {
         let result = render_nodes(std::slice::from_ref(&node), width, width);
         assert!(
             !result.lines.is_empty(),
-            "Table should render lines at width {}",
-            width
+            "Table should render lines at width {width}"
         );
+    }
+}
+
+#[test]
+fn test_inline_code_and_crlf_narrow_width_measure_render_match() {
+    config::load().unwrap();
+    let nodes = [
+        DocNode::Paragraph(vec![crate::parser::InlineSpan::Code("abc".to_string())]),
+        DocNode::Heading {
+            level: 2,
+            text: String::new(),
+        },
+        DocNode::CodeBlock {
+            language: Some("rust".to_string()),
+            code: "fn main() {\r\n\tprintln!(\"crlf\");\r\n}\r\n".to_string(),
+        },
+        DocNode::Table {
+            headers: vec![],
+            rows: vec![vec!["orphan".to_string()]],
+        },
+    ];
+
+    for width in 1..=30 {
+        for (i, node) in nodes.iter().enumerate() {
+            let measured = super::measure::measure_node_height(node, width);
+            let rendered = render_nodes(std::slice::from_ref(node), width, width);
+            assert_eq!(
+                measured,
+                rendered.lines.len(),
+                "width {width}, node {i}: measured={measured}, rendered={}",
+                rendered.lines.len()
+            );
+            for line in &rendered.lines {
+                for span in &line.spans {
+                    assert!(
+                        !span.content.contains('\r'),
+                        "Rendered span should not contain raw CR"
+                    );
+                }
+            }
+        }
     }
 }

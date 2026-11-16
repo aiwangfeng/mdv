@@ -16,7 +16,6 @@ pub(super) fn heading_prefix(level: u8) -> &'static str {
         3 => "###",
         4 => "####",
         5 => "#####",
-        6 => "######",
         _ => "######",
     }
 }
@@ -54,7 +53,7 @@ pub(super) fn render_inline_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
                 result.push(Span::styled(s, Theme::inline_code()));
             }
             InlineSpan::Strikethrough(t) => {
-                result.push(Span::styled(t.clone(), Theme::strikethrough()))
+                result.push(Span::styled(t.clone(), Theme::strikethrough()));
             }
             InlineSpan::StyledText {
                 text,
@@ -75,7 +74,7 @@ pub(super) fn render_inline_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
                 result.push(Span::styled(text.clone(), style));
             }
             InlineSpan::Link { text, url } => {
-                log::trace!("Rendering link to URL: {}", url);
+                log::trace!("Rendering link to URL: {url}");
                 result.push(Span::styled(text.clone(), Theme::link()));
             }
             InlineSpan::Image { src, alt } => {

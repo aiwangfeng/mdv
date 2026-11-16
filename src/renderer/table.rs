@@ -120,7 +120,7 @@ fn compute_col_widths(
         let total: usize = widths.iter().sum();
         if total > avail {
             let mut diff = total - avail;
-            for w in widths.iter_mut() {
+            for w in &mut widths {
                 if diff == 0 {
                     break;
                 }
@@ -144,12 +144,19 @@ fn compute_col_widths(
     }
 
     let shrinkage_needed = total_natural.saturating_sub(avail);
-    let scale = (shrinkage_needed as f64 / total_excess as f64).min(1.0);
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    {
+        let scale = (shrinkage_needed as f64 / total_excess as f64).min(1.0);
 
-    for w in widths.iter_mut() {
-        let excess = w.saturating_sub(TABLE_MIN_COL_WIDTH);
-        let shrink = (excess as f64 * scale).floor() as usize;
-        *w = (*w - shrink).max(TABLE_MIN_COL_WIDTH);
+        for w in &mut widths {
+            let excess = w.saturating_sub(TABLE_MIN_COL_WIDTH);
+            let shrink = (excess as f64 * scale).floor() as usize;
+            *w = (*w - shrink).max(TABLE_MIN_COL_WIDTH);
+        }
     }
 
     let total_after: usize = widths.iter().sum();

@@ -34,28 +34,18 @@ impl std::fmt::Debug for ImageManager {
             .field("pending_images", &self.pending.len())
             .field("queued_images", &self.queue.len())
             .field("failed_images", &self.failed.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl ImageManager {
     pub fn new(no_images: bool) -> Self {
         let (sender, receiver) = mpsc::channel();
-        if no_images {
-            return Self {
-                picker: None,
-                cache: HashMap::new(),
-                cache_order: VecDeque::new(),
-                pending: HashSet::new(),
-                queued: HashSet::new(),
-                queue: VecDeque::new(),
-                failed: HashSet::new(),
-                sender,
-                receiver,
-                active_loads: Arc::new(AtomicUsize::new(0)),
-            };
-        }
-        let picker = Picker::from_query_stdio().ok();
+        let picker = if no_images {
+            None
+        } else {
+            Picker::from_query_stdio().ok()
+        };
         Self {
             picker,
             cache: HashMap::new(),
@@ -74,7 +64,19 @@ impl ImageManager {
         self.picker.is_some()
     }
 
+    pub fn cache_key(src: &str, base_dir: &Path) -> String {
+        if src.starts_with('/') || src.starts_with("~/") || src.starts_with("file://") {
+            src.to_string()
+        } else {
+            base_dir.join(src).to_string_lossy().into_owned()
+        }
+    }
+
     fn resolve_safe_path(src: &str, base_dir: &Path) -> Option<PathBuf> {
+        if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
+            return None;
+        }
+
         let candidate = if let Some(rest) = src.strip_prefix("~/") {
             let home = dirs_home()?;
             home.join(rest)
@@ -93,14 +95,12 @@ impl ImageManager {
 
         let path_str = canonical.to_string_lossy();
         if path_str.starts_with("/etc")
+            || path_str.starts_with("/private/etc")
             || path_str.starts_with("/proc")
             || path_str.starts_with("/sys")
             || path_str.starts_with("/dev")
         {
-            log::warn!(
-                "Rejected image path in restricted system directory: {}",
-                src
-            );
+            log::warn!("Rejected image path in restricted system directory: {src}");
             return None;
         }
 
@@ -112,23 +112,23 @@ impl ImageManager {
         if self.picker.is_none() {
             return;
         }
-        if self.cache.contains_key(src)
-            || self.pending.contains(src)
-            || self.queued.contains(src)
-            || self.failed.contains(src)
+        let key = Self::cache_key(src, base_dir);
+        if self.cache.contains_key(&key)
+            || self.pending.contains(&key)
+            || self.queued.contains(&key)
+            || self.failed.contains(&key)
         {
             return;
         }
 
         let Some(path) = Self::resolve_safe_path(src, base_dir) else {
-            self.failed.insert(src.to_string());
+            self.failed.insert(key);
             return;
         };
 
-        let src_owned = src.to_string();
-        if !self.start_load(src_owned.clone(), path.clone()) {
-            self.queued.insert(src_owned.clone());
-            self.queue.push_back((src_owned, path));
+        if !self.start_load(key.clone(), path.clone()) {
+            self.queued.insert(key.clone());
+            self.queue.push_back((key, path));
         }
     }
 
@@ -138,14 +138,14 @@ impl ImageManager {
         if self.picker.is_none() {
             return false;
         }
-        while let Ok((src, result)) = self.receiver.try_recv() {
-            self.pending.remove(&src);
+        while let Ok((key, result)) = self.receiver.try_recv() {
+            self.pending.remove(&key);
             match result {
                 Ok(img) => {
                     let protocol = self.picker.as_mut().unwrap().new_resize_protocol(img);
-                    self.cache.insert(src.clone(), protocol);
-                    self.cache_order.retain(|k| k != &src);
-                    self.cache_order.push_back(src);
+                    self.cache.insert(key.clone(), protocol);
+                    self.cache_order.retain(|k| k != &key);
+                    self.cache_order.push_back(key);
                     while self.cache.len() > MAX_IMAGE_CACHE {
                         if let Some(old) = self.cache_order.pop_front() {
                             self.cache.remove(&old);
@@ -154,8 +154,8 @@ impl ImageManager {
                     new_images = true;
                 }
                 Err(e) => {
-                    log::warn!("Failed to load image '{}': {}", src, e);
-                    self.failed.insert(src);
+                    log::warn!("Failed to load image '{key}': {e}");
+                    self.failed.insert(key);
                 }
             }
         }
@@ -163,12 +163,17 @@ impl ImageManager {
         new_images
     }
 
-    pub fn get_protocol_mut(&mut self, src: &str) -> Option<&mut StatefulProtocol> {
-        if self.cache.contains_key(src) {
-            self.cache_order.retain(|k| k != src);
-            self.cache_order.push_back(src.to_string());
+    pub fn get_protocol_mut(
+        &mut self,
+        src: &str,
+        base_dir: &Path,
+    ) -> Option<&mut StatefulProtocol> {
+        let key = Self::cache_key(src, base_dir);
+        if self.cache.contains_key(&key) {
+            self.cache_order.retain(|k| k != &key);
+            self.cache_order.push_back(key.clone());
         }
-        self.cache.get_mut(src)
+        self.cache.get_mut(&key)
     }
 
     fn start_load(&mut self, src: String, path: PathBuf) -> bool {

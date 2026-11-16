@@ -51,7 +51,7 @@ fn align_strings(src: &str, dst: &str) -> Vec<usize> {
         for j in 1..=m {
             let c_src = src_chars[i - 1].1;
             let c_dst = dst_chars[j - 1].1;
-            let cost = if c_src == c_dst { 0 } else { 1 };
+            let cost = usize::from(c_src != c_dst);
             dp[i * stride + j] = (dp[(i - 1) * stride + (j - 1)] + cost)
                 .min(dp[(i - 1) * stride + j] + 1)
                 .min(dp[i * stride + (j - 1)] + 1);
@@ -68,7 +68,7 @@ fn align_strings(src: &str, dst: &str) -> Vec<usize> {
         } else {
             let c_src = src_chars[i - 1].1;
             let c_dst = dst_chars[j - 1].1;
-            let cost = if c_src == c_dst { 0 } else { 1 };
+            let cost = usize::from(c_src != c_dst);
 
             if dp[i * stride + j] == dp[(i - 1) * stride + (j - 1)] + cost {
                 dst_to_src_char[j - 1] = i - 1;
@@ -105,10 +105,46 @@ fn find_mapped_matches(
     full: &str,
     line_text: &str,
     query_norm: &str,
+    case_sensitive: bool,
 ) -> Vec<(usize, usize, usize, usize)> {
-    // Build src_lower and src_map: lowercased chars → original byte offsets
-    let mut src_lower = String::new();
-    let mut src_map = Vec::new();
+    // Find all match ranges in line_text
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(idx) = line_text[offset..].find(query_norm) {
+        let abs_start = offset + idx;
+        let abs_end = abs_start + query_norm.len();
+        matches.push((abs_start, abs_end));
+        offset = abs_start + query_norm.len().max(1);
+    }
+    if matches.is_empty() {
+        return Vec::new();
+    }
+
+    // Fast path when line_text is identical to full
+    if full == line_text {
+        return matches
+            .into_iter()
+            .filter(|&(s, e)| s < e)
+            .map(|(s, e)| (s, e, s, e))
+            .collect();
+    }
+
+    if case_sensitive {
+        let byte_map = align_strings(full, line_text);
+        let mut mapped = Vec::with_capacity(matches.len());
+        for (abs_start, abs_end) in matches {
+            let m_start = byte_map[abs_start];
+            let m_end = byte_map[abs_end];
+            if m_start < m_end {
+                mapped.push((abs_start, abs_end, m_start, m_end));
+            }
+        }
+        return mapped;
+    }
+
+    // Build src_lower and src_map: lowercased bytes → original byte offsets in `full`
+    let mut src_lower = String::with_capacity(full.len());
+    let mut src_map = Vec::with_capacity(full.len() + 1);
     for (byte_offset, c) in full.char_indices() {
         for lower_c in c.to_lowercase() {
             let len = lower_c.len_utf8();
@@ -120,25 +156,27 @@ fn find_mapped_matches(
     }
     src_map.push(full.len());
 
-    // Align line_text (lowercased/NFC normalized) with src_lower
-    let byte_map = align_strings(&src_lower, line_text);
+    // Fast path when src_lower is already NFC (identical to line_text)
+    let opt_byte_map = if src_lower == line_text {
+        None
+    } else {
+        Some(align_strings(&src_lower, line_text))
+    };
 
-    // Find all match ranges in line_text, then map to original byte offsets
-    let mut matches = Vec::new();
-    let mut offset = 0;
-    while let Some(idx) = line_text[offset..].find(query_norm) {
-        let abs_start = offset + idx;
-        let abs_end = abs_start + query_norm.len();
-        matches.push((abs_start, abs_end));
-        offset = abs_start + query_norm.len().max(1);
-    }
-
-    let mut mapped = Vec::new();
-    for &(abs_start, abs_end) in &matches {
-        let src_lower_start = byte_map[abs_start];
-        let src_lower_end = byte_map[abs_end];
+    let mut mapped = Vec::with_capacity(matches.len());
+    for (abs_start, abs_end) in matches {
+        let (src_lower_start, src_lower_end) = if let Some(ref bm) = opt_byte_map {
+            (bm[abs_start], bm[abs_end])
+        } else {
+            (abs_start, abs_end)
+        };
         let m_start = src_map[src_lower_start];
-        let m_end = src_map[src_lower_end];
+        let mut m_end = src_map[src_lower_end];
+        if m_end <= m_start && m_start < full.len() {
+            if let Some(ch) = full[m_start..].chars().next() {
+                m_end = m_start + ch.len_utf8();
+            }
+        }
         if m_start < m_end {
             mapped.push((abs_start, abs_end, m_start, m_end));
         }
@@ -223,7 +261,7 @@ pub fn apply_search_highlight(
         return lines;
     }
 
-    let has_upper = query.chars().any(|c| c.is_uppercase());
+    let has_upper = query.chars().any(char::is_uppercase);
     let query_norm: String = if has_upper {
         query.nfc().collect()
     } else {
@@ -241,19 +279,19 @@ pub fn apply_search_highlight(
             let line_text: String = if let Some(texts) = lowercased_texts {
                 texts
                     .get(text_offset + i)
-                    .map(|s| s.to_string())
+                    .map(|&s| s.to_string())
                     .unwrap_or_default()
             } else if has_upper {
-                full.clone()
+                full.nfc().collect()
             } else {
-                full.to_lowercase()
+                full.to_lowercase().nfc().collect()
             };
 
             if !line_text.contains(&query_norm) {
                 return line;
             }
 
-            let mapped_matches = find_mapped_matches(&full, &line_text, &query_norm);
+            let mapped_matches = find_mapped_matches(&full, &line_text, &query_norm, has_upper);
             let new_spans =
                 rebuild_spans_with_highlights(line.spans, &mapped_matches, line_idx, current_match);
             Line::from(new_spans)

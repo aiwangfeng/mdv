@@ -109,8 +109,8 @@ fn extract_heading_text(events: &mut EventIter<'_>) -> String {
     let mut text = String::new();
     for e in events.by_ref() {
         match e {
-            Event::Text(t) => text.push_str(&t),
-            Event::Code(t) => text.push_str(&t),
+            Event::Text(t) | Event::Code(t) | Event::InlineHtml(t) => text.push_str(&t),
+            Event::SoftBreak | Event::HardBreak => text.push(' '),
             Event::End(TagEnd::Heading(_)) => break,
             _ => {}
         }
@@ -182,14 +182,26 @@ fn handle_inline_event(
             dest_url, title, ..
         }) => {
             let alt = collect_image_alt_text(events);
-            spans.push(InlineSpan::Image {
-                src: dest_url.into_string(),
-                alt: if alt.is_empty() {
-                    title.into_string()
+            let resolved_alt = if alt.is_empty() {
+                title.into_string()
+            } else {
+                alt
+            };
+            if state.link_url.is_some() {
+                let label = if resolved_alt.is_empty() {
+                    dest_url.as_ref()
                 } else {
-                    alt
-                },
-            });
+                    resolved_alt.as_str()
+                };
+                state.link_text.push_str("[image: ");
+                state.link_text.push_str(label);
+                state.link_text.push(']');
+            } else {
+                spans.push(InlineSpan::Image {
+                    src: dest_url.into_string(),
+                    alt: resolved_alt,
+                });
+            }
         }
         Event::Text(t) => {
             if state.link_url.is_some() {
@@ -215,7 +227,9 @@ fn handle_inline_event(
         }
         Event::Code(t) => {
             if state.link_url.is_some() {
-                state.link_text.push_str(&format!("`{}`", t));
+                state.link_text.push('`');
+                state.link_text.push_str(&t);
+                state.link_text.push('`');
             } else {
                 spans.push(InlineSpan::Code(t.into_string()));
             }
@@ -320,6 +334,9 @@ fn parse_blocks(
             Event::Start(Tag::BlockQuote(_)) => {
                 let mut children: Vec<DocNode> = Vec::new();
                 parse_blocks(events, &mut children, None, true);
+                if matches!(children.last(), Some(DocNode::Blank)) {
+                    children.pop();
+                }
                 nodes.push(DocNode::BlockQuote(children));
                 nodes.push(DocNode::Blank);
             }
@@ -363,8 +380,6 @@ fn parse_blocks(
                 nodes.push(DocNode::Paragraph(vec![InlineSpan::Text(t.into_string())]));
                 nodes.push(DocNode::Blank);
             }
-
-            Event::HardBreak | Event::SoftBreak => {}
 
             _ => {}
         }
@@ -494,7 +509,10 @@ fn collect_table(
                 current_cell.clear();
             }
             Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
-                current_cell.push_str(&t)
+                current_cell.push_str(&t);
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                current_cell.push(' ');
             }
             _ => {}
         }

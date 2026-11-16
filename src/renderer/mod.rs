@@ -1,4 +1,4 @@
-//! Renderer module: converts DocNode trees into ratatui Lines for display.
+//! Renderer module: converts `DocNode` trees into ratatui Lines for display.
 //! Submodules are organized by functional domain.
 
 use ratatui::{
@@ -26,7 +26,7 @@ const CODE_BLOCK_RIGHT_BORDER: &str = "│";
 const CODE_BLOCK_TOP_LEFT: &str = "╭─ ";
 const CODE_BLOCK_TOP_RIGHT: &str = "╮";
 const CODE_BLOCK_BOTTOM_LEFT: &str = "╰─";
-const CODE_BLOCK_BOTTOM_RIGHT: &str = "┘";
+const CODE_BLOCK_BOTTOM_RIGHT: &str = "╯";
 const CODE_BLOCK_SPACE_BEFORE_DASHES: usize = 1;
 
 const BLOCKQUOTE_LEFT_BORDER: &str = "│ ";
@@ -129,7 +129,11 @@ pub fn render_viewport(
     let last = {
         let mut i = first;
         while i < nodes.len() {
-            let node_end = node_line_starts[i] + measure::measure_node_height(&nodes[i], width);
+            let node_end = if i + 1 < node_line_starts.len() {
+                node_line_starts[i + 1]
+            } else {
+                node_line_starts[i] + measure::measure_node_height(&nodes[i], width)
+            };
             if node_end >= viewport_last {
                 i += 1;
                 break;
@@ -170,7 +174,7 @@ pub fn render_viewport(
     r
 }
 
-/// Render a list of DocNodes into a flat list of ratatui Lines.
+/// Render a list of `DocNode`s into a flat list of ratatui Lines.
 ///
 /// `width` is the content column width for text wrapping.
 pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderResult {
@@ -186,11 +190,7 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
             DocNode::Heading { level, text } => {
                 let prefix = inline::heading_prefix(*level);
                 let style = Theme::heading(*level);
-                let spans = vec![
-                    Span::styled(prefix, style),
-                    Span::styled(" ", style),
-                    Span::styled(text.clone(), style),
-                ];
+                let spans = vec![Span::styled(format!("{prefix} {text}"), style)];
                 let wrapped = inline::soft_wrap_spans(spans, w);
                 lines.extend(wrapped);
             }
@@ -259,11 +259,7 @@ pub fn render_nodes(nodes: &[DocNode], width: u16, full_width: u16) -> RenderRes
 
                 // Nested content starts after the top border (if present).
                 let content_offset =
-                    if start_idx < lines.len() && !nested.image_positions.is_empty() {
-                        1
-                    } else {
-                        0
-                    };
+                    usize::from(start_idx < lines.len() && !nested.image_positions.is_empty());
                 image_positions.extend(
                     nested
                         .image_positions

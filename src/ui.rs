@@ -20,12 +20,27 @@ use crate::image_proto::ImageManager;
 const BORDER_SIZE: u16 = 2;
 use crate::renderer::{apply_search_highlight, IMAGE_RENDER_HEIGHT};
 use crate::theme::Theme;
-use crossterm::event::{KeyCode, KeyModifiers};
 
 fn get_content_margin() -> u16 {
     config::get().content_margin
 }
 
+fn borrow_line<'a>(line: &'a Line<'static>) -> Line<'a> {
+    let spans = line
+        .spans
+        .iter()
+        .map(|s| Span {
+            content: std::borrow::Cow::Borrowed(s.content.as_ref()),
+            style: s.style,
+        })
+        .collect::<Vec<_>>();
+    let mut l = Line::from(spans);
+    l.alignment = line.alignment;
+    l.style = line.style;
+    l
+}
+
+#[allow(clippy::struct_field_names)]
 pub struct LayoutResult {
     pub toc_area: Option<Rect>,
     pub content_area: Rect,
@@ -36,7 +51,10 @@ pub fn calculate_layout(app: &mut App, area: Rect) -> LayoutResult {
     let [main_area, status_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
-    let show_toc = app.show_toc && (app.toc_len() > 0 || app.is_directory_mode());
+    let show_toc = app.is_toc_visible();
+    if !show_toc && app.focus == Focus::Toc {
+        app.focus = Focus::Content;
+    }
     let (toc_area, content_area) = if show_toc {
         let toc_pct = app.toc_width_pct.min(50);
         let [l, r] = Layout::horizontal([
@@ -175,31 +193,38 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
     };
     let title_style = Theme::toc_title();
 
-    let (title, visible_items): (String, Vec<ListItem>) =
-        if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
-            // File list mode (with optional search filter)
-            let filtered = (app.dir_search_active || app.mode == crate::app::Mode::Search)
-                && !app.search_matches.is_empty();
-            let total = if filtered {
-                app.search_matches.len()
-            } else {
-                app.dir_files.len()
-            };
-            let title = if filtered {
-                format!(
-                    " 📁 {}/{} files (/{}) ",
-                    app.search_matches.len(),
-                    app.dir_files.len(),
-                    app.search_query
-                )
-            } else {
-                format!(" 📁 {} files ", app.dir_files.len())
-            };
-            let visible_start = app.dir_scroll;
-            let visible_end =
-                (visible_start + area.height.saturating_sub(BORDER_SIZE) as usize).min(total);
-            let query_lower = app.search_query.to_lowercase();
-            let items: Vec<ListItem> = (visible_start..visible_end)
+    let (title, visible_items): (String, Vec<ListItem>) = if app.is_directory_mode()
+        && app.dir_view == crate::app::DirView::FileList
+    {
+        // File list mode (with optional search filter)
+        let filtered = (app.dir_search_active || app.mode == crate::app::Mode::Search)
+            && !app.search_query.is_empty();
+        let total = if filtered {
+            app.search_matches.len()
+        } else {
+            app.dir_files.len()
+        };
+        let title = if filtered {
+            format!(
+                " 📁 {}/{} files (/{}) ",
+                app.search_matches.len(),
+                app.dir_files.len(),
+                app.search_query
+            )
+        } else {
+            format!(" 📁 {} files ", app.dir_files.len())
+        };
+        let visible_start = app.dir_scroll;
+        let visible_end =
+            (visible_start + area.height.saturating_sub(BORDER_SIZE) as usize).min(total);
+        let query_lower = app.search_query.to_lowercase();
+        let items: Vec<ListItem> = if filtered && total == 0 {
+            vec![ListItem::new(Line::from(Span::styled(
+                "  (no matching files)",
+                Theme::subtext(),
+            )))]
+        } else {
+            (visible_start..visible_end)
                 .map(|pos| {
                     let file_idx = if filtered {
                         app.search_matches[pos].line_idx
@@ -208,8 +233,12 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                     };
                     let entry = &app.dir_files[file_idx];
                     let prefix = "  ";
-                    let base_style = if file_idx == app.dir_cursor && focused {
-                        Theme::toc_selected()
+                    let base_style = if file_idx == app.dir_cursor {
+                        if focused {
+                            Theme::toc_selected()
+                        } else {
+                            Theme::toc_synced()
+                        }
                     } else {
                         Theme::text()
                     };
@@ -218,47 +247,48 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
                         highlight_file_name(prefix, &entry.display_name, &query_lower, base_style)
                     } else {
                         vec![Span::styled(
-                            format!("{}{}", prefix, entry.display_name),
+                            format!("{prefix}{}", entry.display_name),
                             base_style,
                         )]
                     };
                     ListItem::new(Line::from(spans))
                 })
-                .collect();
-            (title, items)
-        } else {
-            // Normal TOC mode (headings)
-            let title = format!(" {} TOC ", "📑");
-            let synced = app.synced_toc_index();
-            let visible_start = app.toc_scroll;
-            let visible_end = (visible_start + area.height.saturating_sub(BORDER_SIZE) as usize)
-                .min(app.document.toc.len());
-            let items: Vec<ListItem> = app
-                .document
-                .toc
-                .iter()
-                .enumerate()
-                .skip(visible_start)
-                .take(visible_end.saturating_sub(visible_start))
-                .map(|(i, entry)| {
-                    let prefix = match entry.level {
-                        1 => "▌ ",
-                        2 => "  ▎ ",
-                        _ => "    · ",
-                    };
-                    let style = if i == app.toc_cursor && focused {
-                        Theme::toc_selected()
-                    } else if Some(i) == synced {
-                        Theme::toc_synced()
-                    } else {
-                        Theme::toc_item(entry.level)
-                    };
-                    let text = format!("{}{}", prefix, entry.title);
-                    ListItem::new(Line::from(Span::styled(text, style)))
-                })
-                .collect();
-            (title, items)
+                .collect()
         };
+        (title, items)
+    } else {
+        // Normal TOC mode (headings)
+        let title = " 📑 TOC ".to_string();
+        let synced = app.synced_toc_index();
+        let visible_start = app.toc_scroll;
+        let visible_end = (visible_start + area.height.saturating_sub(BORDER_SIZE) as usize)
+            .min(app.document.toc.len());
+        let items: Vec<ListItem> = app
+            .document
+            .toc
+            .iter()
+            .enumerate()
+            .skip(visible_start)
+            .take(visible_end.saturating_sub(visible_start))
+            .map(|(i, entry)| {
+                let prefix = match entry.level {
+                    1 => "▌ ",
+                    2 => "  ▎ ",
+                    _ => "    · ",
+                };
+                let style = if i == app.toc_cursor && focused {
+                    Theme::toc_selected()
+                } else if Some(i) == synced {
+                    Theme::toc_synced()
+                } else {
+                    Theme::toc_item(entry.level)
+                };
+                let text = format!("{prefix}{}", entry.title);
+                ListItem::new(Line::from(Span::styled(text, style)))
+            })
+            .collect();
+        (title, items)
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -269,22 +299,8 @@ fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let (cursor, scroll) =
-        if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
-            if app.dir_search_active && !app.search_matches.is_empty() {
-                (app.dir_search_cursor, app.dir_scroll)
-            } else {
-                (app.dir_cursor, app.dir_scroll)
-            }
-        } else {
-            (app.toc_cursor, app.toc_scroll)
-        };
-
-    let mut list_state = ListState::default();
-    list_state.select(Some(cursor.saturating_sub(scroll)));
-
-    let list = List::new(visible_items).highlight_style(Theme::toc_selected());
-    frame.render_stateful_widget(list, inner, &mut list_state);
+    let list = List::new(visible_items);
+    frame.render_widget(list, inner);
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +352,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
             Line::from(vec![Span::styled("  q  Quit  ", Theme::subtext())]),
             Line::from(""),
             Line::from(vec![Span::styled(
-                format!("  {} markdown file(s) found  ", file_count),
+                format!("  {file_count} markdown file(s) found  "),
                 Theme::bold(),
             )]),
         ];
@@ -353,11 +369,11 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
     }
 
     let m = if app.search_matches.is_empty() {
-        "".to_string()
+        String::new()
     } else {
         format!(" {}/{} ", app.search_current + 1, app.search_matches.len())
     };
-    let title = format!("  {} {}", app.file_name, m);
+    let title = format!("  {} {m}", app.file_name);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -381,25 +397,13 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
         Some(app.search_matches[app.search_current])
     };
 
-    fn borrow_line<'a>(line: &'a Line<'static>) -> Line<'a> {
-        let spans = line
-            .spans
-            .iter()
-            .map(|s| Span {
-                content: std::borrow::Cow::Borrowed(s.content.as_ref()),
-                style: s.style,
-            })
-            .collect::<Vec<_>>();
-        let mut l = Line::from(spans);
-        l.alignment = line.alignment;
-        l.style = line.style;
-        l
-    }
-
     let viewport_lines = app.get_viewport_lines();
     let viewport_offset = app.get_viewport_scroll();
 
-    if app.search_query.is_empty() || viewport_lines.is_empty() {
+    if app.search_query_norm.is_empty()
+        || app.search_matches.is_empty()
+        || viewport_lines.is_empty()
+    {
         let visible_lines: Vec<Line<'_>> = if viewport_offset <= scroll {
             let start = scroll - viewport_offset;
             let end = (start + height).min(viewport_lines.len());
@@ -425,40 +429,37 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
         } else {
             vec![]
         };
-        let mut result = Vec::with_capacity(height);
-        let q = app.search_query_norm.clone();
+        let mut result = Vec::with_capacity(visible_slice.len());
         let has_upper = app.search_has_upper;
 
         for (i, line) in visible_slice.into_iter().enumerate() {
             let line_idx = scroll + i;
+            if !app.line_has_search_match(line_idx) {
+                result.push(line);
+                continue;
+            }
             if let Some(cached) = app.get_cached_highlight(line_idx) {
                 result.push(cached);
                 continue;
             }
-            let line_matches = app.rendered_line_matches(line_idx, &q, has_upper);
-            if line_matches {
-                let line_text = if has_upper {
-                    app.rendered_line_text(line_idx)
-                } else {
-                    app.rendered_line_text_lower(line_idx)
-                }
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-                let highlighted = apply_search_highlight(
-                    vec![line.clone()],
-                    &app.search_query_norm,
-                    current_match,
-                    line_idx,
-                    Some(&[line_text.as_str()]),
-                    0,
-                );
-                if let Some(hl_line) = highlighted.into_iter().next() {
-                    let hl = hl_line.clone();
-                    app.cache_highlight(line_idx, hl);
-                    result.push(hl_line);
-                } else {
-                    result.push(line);
-                }
+            let line_text = if has_upper {
+                app.rendered_line_text(line_idx)
+            } else {
+                app.rendered_line_text_lower(line_idx)
+            }
+            .map(str::to_string)
+            .unwrap_or_default();
+            let highlighted = apply_search_highlight(
+                vec![line.clone()],
+                &app.search_query_norm,
+                current_match,
+                line_idx,
+                Some(&[line_text.as_str()]),
+                0,
+            );
+            if let Some(hl_line) = highlighted.into_iter().next() {
+                app.cache_highlight(line_idx, hl_line.clone());
+                result.push(hl_line);
             } else {
                 result.push(line);
             }
@@ -468,11 +469,16 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
     }
 
     if img_mgr.is_enabled() {
+        let base_dir = app
+            .file_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         for (line_idx, src, _alt) in &app.image_positions {
             let img_end = *line_idx + IMAGE_RENDER_HEIGHT;
             if img_end <= scroll || *line_idx >= scroll + height {
                 continue;
             }
+            #[allow(clippy::cast_possible_truncation)]
             let (row_in_view, img_height) = if *line_idx >= scroll {
                 let row = (*line_idx - scroll) as u16;
                 let h =
@@ -494,7 +500,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, img_mgr: &mut ImageManager, ar
                 width: inner_with_margin.width,
                 height: img_height,
             };
-            if let Some(protocol) = img_mgr.get_protocol_mut(src) {
+            if let Some(protocol) = img_mgr.get_protocol_mut(src, base_dir) {
                 let widget = StatefulImage::new().resize(Resize::Fit(None));
                 frame.render_stateful_widget(widget, img_area, protocol);
             }
@@ -529,15 +535,15 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let scroll_pct = if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
-        if app.dir_files.is_empty() {
+        if app.dir_files.len() <= 1 {
             100
         } else {
-            ((app.dir_cursor as u64 * 100) / (app.dir_files.len().max(1) as u64)).min(100) as usize
+            ((app.dir_cursor as u64 * 100) / ((app.dir_files.len() - 1) as u64)).min(100) as usize
         }
-    } else if app.total_lines() == 0 {
+    } else if app.max_scroll() == 0 {
         100
     } else {
-        ((app.scroll as u64 * 100) / (app.total_lines().max(1) as u64)).min(100) as usize
+        ((app.scroll as u64 * 100) / (app.max_scroll() as u64)).min(100) as usize
     };
 
     let search_hint = if !app.search_query.is_empty() {
@@ -552,66 +558,50 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let left = Line::from(vec![
         Span::styled(mode_text, Theme::statusbar_mode()),
-        Span::styled(format!("  {} ", focus_text), Theme::statusbar()),
+        Span::styled(format!("  {focus_text} "), Theme::statusbar()),
         Span::styled(search_hint, Theme::statusbar_key()),
     ]);
 
     let theme_name = config::current_theme_name();
     let keys = config::keymap();
-    let key_label = |binding: config::KeyBinding| -> String {
-        let modifier_prefix = if binding.modifiers.contains(KeyModifiers::CONTROL) {
-            "C-"
-        } else if binding.modifiers.contains(KeyModifiers::ALT) {
-            "M-"
-        } else {
-            ""
-        };
-        let key_str = match binding.code {
-            KeyCode::Char(c) => c.to_string(),
-            KeyCode::Esc => "Esc".to_string(),
-            KeyCode::Enter => "Enter".to_string(),
-            KeyCode::Tab => "Tab".to_string(),
-            KeyCode::Backspace => "BS".to_string(),
-            KeyCode::Up => "↑".to_string(),
-            KeyCode::Down => "↓".to_string(),
-            KeyCode::Left => "←".to_string(),
-            KeyCode::Right => "→".to_string(),
-            KeyCode::PageUp => "PgUp".to_string(),
-            KeyCode::PageDown => "PgDn".to_string(),
-            KeyCode::Home => "Home".to_string(),
-            KeyCode::End => "End".to_string(),
-            _ => "?".to_string(),
-        };
-        format!("{}{}", modifier_prefix, key_str)
-    };
-    let keys_text = format!(
-        " {}:{}  {}:{}  {}:{}  {}:{}  {}/{}:focus  {}/{}:scroll  {}:theme({}) ",
-        key_label(keys.quit),
-        "quit",
-        key_label(keys.help),
-        "help",
-        key_label(keys.search),
-        "search",
-        key_label(keys.toggle_toc),
-        "toc",
-        key_label(keys.focus_prev),
-        key_label(keys.focus_next),
-        key_label(keys.up),
-        key_label(keys.down),
-        key_label(keys.next_theme),
-        theme_name,
+    let full_keys_text = format!(
+        " {}:quit  {}:help  {}:search  {}:toc  {}/{}:focus  {}/{}:scroll  {}:theme({theme_name}) ",
+        keys.quit.display_label(),
+        keys.help.display_label(),
+        keys.search.display_label(),
+        keys.toggle_toc.display_label(),
+        keys.focus_prev.display_label(),
+        keys.focus_next.display_label(),
+        keys.up.display_label(),
+        keys.down.display_label(),
+        keys.next_theme.display_label(),
     );
-    let right_text = format!(" {}% ", scroll_pct);
-    let right = format!("{}{}", keys_text, right_text);
+    let compact_keys_text = format!(
+        " {}:quit  {}:help  {}:search ",
+        keys.quit.display_label(),
+        keys.help.display_label(),
+        keys.search.display_label(),
+    );
+    let right_text = format!(" {scroll_pct}% ");
+    let full_right = format!("{full_keys_text}{right_text}");
+    let compact_right = format!("{compact_keys_text}{right_text}");
 
-    // Pad to fill width
     let left_width: usize = left
         .spans
         .iter()
         .map(|s| crate::width::str_width(s.content.as_ref()))
         .sum();
-    let pad =
-        (area.width as usize).saturating_sub(left_width + crate::width::str_width(right.as_str()));
+    let avail_width = area.width as usize;
+
+    let right = if left_width + crate::width::str_width(&full_right) <= avail_width {
+        full_right
+    } else if left_width + crate::width::str_width(&compact_right) <= avail_width {
+        compact_right
+    } else {
+        right_text
+    };
+
+    let pad = avail_width.saturating_sub(left_width + crate::width::str_width(right.as_str()));
 
     // Re-build as styled line preserving original left spans
     let mut status_spans = left.spans;
@@ -651,33 +641,7 @@ fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
     let keys = config::keymap();
-    let fmt = |binding: config::KeyBinding| -> String {
-        let mods = binding.modifiers;
-        let mut parts = Vec::new();
-        if mods.contains(KeyModifiers::CONTROL) {
-            parts.push("C");
-        }
-        if mods.contains(KeyModifiers::ALT) {
-            parts.push("A");
-        }
-        let key = match binding.code {
-            KeyCode::Char(c) => c.to_string(),
-            KeyCode::Up => "↑".to_string(),
-            KeyCode::Down => "↓".to_string(),
-            KeyCode::Left => "←".to_string(),
-            KeyCode::Right => "→".to_string(),
-            KeyCode::Esc => "Esc".to_string(),
-            KeyCode::Enter => "Enter".to_string(),
-            KeyCode::Backspace => "Bksp".to_string(),
-            KeyCode::Tab => "Tab".to_string(),
-            _ => "?".to_string(),
-        };
-        if parts.is_empty() {
-            key
-        } else {
-            format!("{}-{}", parts.join("-"), key)
-        }
-    };
+    let fmt = |binding: config::KeyBinding| -> String { binding.display_label() };
 
     let items: Vec<(String, &str)> = vec![
         (fmt(keys.down), "Scroll down"),

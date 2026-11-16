@@ -38,17 +38,16 @@ fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntr
     for entry in read_dir.flatten() {
         let path = entry.path();
 
-        let sym_meta = match fs::symlink_metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(sym_meta) = fs::symlink_metadata(&path) else {
+            continue;
         };
 
         let is_symlink = sym_meta.file_type().is_symlink();
         let meta = if is_symlink {
-            match fs::metadata(&path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            }
+            let Ok(m) = fs::metadata(&path) else {
+                continue;
+            };
+            m
         } else {
             sym_meta
         };
@@ -87,8 +86,7 @@ fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntr
             let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             let rel_depth = path
                 .strip_prefix(base)
-                .map(|p| p.components().count().saturating_sub(1))
-                .unwrap_or(0);
+                .map_or(0, |p| p.components().count().saturating_sub(1));
             entries.push(DirEntry {
                 path,
                 display_name,
@@ -102,6 +100,10 @@ fn walk_dir(base: &Path, current: &Path, depth: usize, entries: &mut Vec<DirEntr
 fn is_markdown_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|ext| matches!(ext, "md" | "markdown" | "mdx" | "mdown" | "mkd" | "mkdn"))
-        .unwrap_or(false)
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "md" | "markdown" | "mdx" | "mdown" | "mkd" | "mkdn"
+            )
+        })
 }

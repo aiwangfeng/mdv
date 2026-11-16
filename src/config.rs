@@ -205,6 +205,37 @@ impl KeyBinding {
         };
         relevant_modifiers == self.modifiers
     }
+
+    pub fn display_label(self) -> String {
+        let mut prefix = String::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            prefix.push_str("C-");
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            prefix.push_str("M-");
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) && !matches!(self.code, KeyCode::Char(_)) {
+            prefix.push_str("S-");
+        }
+        let key_str = match self.code {
+            KeyCode::Char(' ') => "Space".to_string(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Esc => "Esc".to_string(),
+            KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Tab => "Tab".to_string(),
+            KeyCode::Backspace => "Bksp".to_string(),
+            KeyCode::Up => "↑".to_string(),
+            KeyCode::Down => "↓".to_string(),
+            KeyCode::Left => "←".to_string(),
+            KeyCode::Right => "→".to_string(),
+            KeyCode::PageUp => "PgUp".to_string(),
+            KeyCode::PageDown => "PgDn".to_string(),
+            KeyCode::Home => "Home".to_string(),
+            KeyCode::End => "End".to_string(),
+            _ => "?".to_string(),
+        };
+        format!("{prefix}{key_str}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,7 +320,7 @@ impl From<ThemeColors> for ThemeConfig {
 pub fn get() -> &'static Config {
     if CONFIG.get().is_none() {
         if let Err(e) = load() {
-            log::warn!("Config initialization failed (using defaults): {}", e);
+            log::warn!("Config initialization failed (using defaults): {e}");
         }
     }
     CONFIG.get_or_init(Config::default)
@@ -298,10 +329,10 @@ pub fn get() -> &'static Config {
 pub fn keymap() -> &'static ResolvedKeybindings {
     if KEYMAP.get().is_none() {
         if let Err(e) = load() {
-            log::warn!("Keymap initialization failed (using defaults): {}", e);
+            log::warn!("Keymap initialization failed (using defaults): {e}");
         }
     }
-    KEYMAP.get().unwrap_or_else(|| &DEFAULT_KEYMAP)
+    KEYMAP.get().unwrap_or(&DEFAULT_KEYMAP)
 }
 
 pub fn load() -> Result<()> {
@@ -370,7 +401,7 @@ pub fn load() -> Result<()> {
     crate::theme::refresh_cached_styles();
 
     for error in &errors {
-        eprintln!("Warning: {}", error);
+        eprintln!("Warning: {error}");
     }
 
     Ok(())
@@ -415,8 +446,11 @@ fn parse_key_code(s: &str) -> KeyCode {
         "backspace" => KeyCode::Backspace,
         "pageup" | "pgup" => KeyCode::PageUp,
         "pagedown" | "pgdown" => KeyCode::PageDown,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "space" => KeyCode::Char(' '),
         _ => {
-            log::warn!("Unknown key binding: '{}', using default", s);
+            log::warn!("Unknown key binding: '{s}', using default");
             KeyCode::Null
         }
     }
@@ -450,7 +484,7 @@ pub fn parse_key(s: &str) -> KeyBinding {
             "alt" | "option" => modifiers |= KeyModifiers::ALT,
             "shift" => modifiers |= KeyModifiers::SHIFT,
             _ => {
-                log::warn!("Unknown key modifier: '{}', using null binding", part);
+                log::warn!("Unknown key modifier: '{part}', using null binding");
                 return KeyBinding::new(KeyCode::Null, KeyModifiers::empty());
             }
         }
@@ -597,5 +631,23 @@ next_theme = "t"
         let config: Config = toml::from_str("").expect("Empty config should parse");
         assert_eq!(config.theme_name, "");
         assert_eq!(config.toc_width_pct, 20);
+    }
+
+    #[test]
+    fn parses_home_end_space_and_formats_display_label() {
+        assert_eq!(
+            parse_key("home"),
+            KeyBinding::new(KeyCode::Home, KeyModifiers::empty())
+        );
+        assert_eq!(
+            parse_key("end"),
+            KeyBinding::new(KeyCode::End, KeyModifiers::empty())
+        );
+        assert_eq!(
+            parse_key("space"),
+            KeyBinding::new(KeyCode::Char(' '), KeyModifiers::empty())
+        );
+        assert_eq!(parse_key("ctrl-d").display_label(), "C-d");
+        assert_eq!(parse_key("space").display_label(), "Space");
     }
 }

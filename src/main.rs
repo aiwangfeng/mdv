@@ -35,7 +35,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{measure_document, App, Focus, Mode};
+use app::{App, Focus, Mode, MAX_FILE_SIZE};
 use image_proto::ImageManager;
 
 enum AppEvent {
@@ -52,7 +52,6 @@ enum AppEvent {
 // CLI
 // ---------------------------------------------------------------------------
 
-const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB limit
 const POLL_INTERVAL_MS: u64 = 16;
 const RESIZE_DEBOUNCE_MS: u64 = 50;
 
@@ -71,6 +70,10 @@ struct Cli {
     /// Disable inline image rendering
     #[arg(long, default_value_t = false)]
     no_images: bool,
+
+    /// Color theme (catppuccin-mocha, nord, gruvbox-dark, tokyo-night, one-dark)
+    #[arg(short = 't', long = "theme", value_name = "THEME")]
+    theme: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +112,22 @@ fn main() -> Result<()> {
     width::init_cjk_width(config::get().cjk_width);
     let cli = Cli::parse();
 
+    if let Some(ref theme_str) = cli.theme {
+        if let Some(theme_name) = themes::ThemeName::from_str(theme_str) {
+            if let Some(idx) = config::AVAILABLE_THEMES
+                .iter()
+                .position(|&t| t == theme_name)
+            {
+                config::apply_theme_by_index(idx);
+            }
+        } else {
+            anyhow::bail!(
+                "Unknown theme '{}'. Available themes: catppuccin-mocha, nord, gruvbox-dark, tokyo-night, one-dark",
+                theme_str
+            );
+        }
+    }
+
     let mut app = if let Some(path) = &cli.path {
         let metadata = match fs::metadata(path) {
             Ok(m) => m,
@@ -137,16 +156,7 @@ fn main() -> Result<()> {
             let markdown = fs::read_to_string(path)
                 .with_context(|| format!("Cannot read '{}'", path.display()))?;
             let document = parser::parse(&markdown);
-            let result = measure_document(&document, 80u16);
-            App::new(
-                path.clone(),
-                document,
-                result.node_heights,
-                result.node_line_starts,
-                result.total_content_lines,
-                vec![],
-                result.toc_line_indices,
-            )
+            App::new(path.clone(), document, vec![], vec![], 0, vec![], vec![])
         }
     } else {
         // No path specified, use current directory
@@ -185,21 +195,21 @@ fn main() -> Result<()> {
 
     // ── Cleanup ──────────────────────────────────────────────────────────────
     if let Err(e) = disable_raw_mode() {
-        eprintln!("Warning: Failed to disable raw mode: {}", e);
+        eprintln!("Warning: Failed to disable raw mode: {e}");
     }
     if let Err(e) = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
     ) {
-        eprintln!("Warning: Failed to restore terminal: {}", e);
+        eprintln!("Warning: Failed to restore terminal: {e}");
     }
     if let Err(e) = terminal.show_cursor() {
-        eprintln!("Warning: Failed to show cursor: {}", e);
+        eprintln!("Warning: Failed to show cursor: {e}");
     }
     stop_input.store(true, Ordering::Relaxed);
     if let Err(e) = input_thread.join() {
-        eprintln!("Warning: Input thread panicked: {:?}", e);
+        eprintln!("Warning: Input thread panicked: {e:?}");
     }
 
     result
@@ -214,10 +224,9 @@ fn run(
     let mut needs_redraw = true;
     let mut resize_deadline: Option<Instant> = None;
 
-    // Initial layout
+    // Initial terminal size
     let size = terminal.size()?;
     let mut terminal_size = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-    ui::calculate_layout(app, terminal_size);
     let mut last_render_width = 0;
 
     loop {
@@ -226,13 +235,6 @@ fn run(
                 resize_deadline = None;
                 let size = terminal.size()?;
                 terminal_size = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-                ui::calculate_layout(app, terminal_size);
-                let cw = app.content_width;
-                if cw > 0 && cw != last_render_width {
-                    app.remeasure(cw);
-                    last_render_width = cw;
-                    app.mark_viewport_dirty();
-                }
                 needs_redraw = true;
             }
         }
@@ -363,7 +365,35 @@ fn handle_app_event(app: &mut App, event: AppEvent) -> bool {
     }
 }
 
+fn apply_theme_and_invalidate(app: &mut App, index: usize) {
+    config::apply_theme_by_index(index);
+    app.mark_viewport_dirty();
+    app.invalidate_search_cache();
+}
+
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> bool {
+    match app.mode {
+        Mode::Help => return false,
+        Mode::ThemePicker => match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                if let Some(index) = app.move_theme_picker(1, config::AVAILABLE_THEMES.len()) {
+                    apply_theme_and_invalidate(app, index);
+                    return true;
+                }
+                return false;
+            }
+            MouseEventKind::ScrollUp => {
+                if let Some(index) = app.move_theme_picker(-1, config::AVAILABLE_THEMES.len()) {
+                    apply_theme_and_invalidate(app, index);
+                    return true;
+                }
+                return false;
+            }
+            _ => return false,
+        },
+        Mode::Normal | Mode::Search => {}
+    }
+
     match mouse.kind {
         MouseEventKind::ScrollDown => {
             if app.is_directory_mode() && app.dir_view == crate::app::DirView::FileList {
@@ -417,6 +447,11 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
         return false;
     }
 
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        app.quit = true;
+        return true;
+    }
+
     // Directory mode key handling
     if app.is_directory_mode() {
         let keys = config::keymap();
@@ -426,36 +461,56 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
                     app.quit = true;
                     return true;
                 }
-                c if keys.down.matches(c, modifiers) => {
+                c if keys.help.matches(c, modifiers) => {
+                    app.toggle_help();
+                    return true;
+                }
+                c if keys.next_theme.matches(c, modifiers) => {
+                    app.open_theme_picker(config::current_theme_index());
+                    return true;
+                }
+                c if keys.down.matches(c, modifiers)
+                    || (c == KeyCode::Down && modifiers.is_empty()) =>
+                {
                     let before = (app.dir_cursor, app.dir_scroll);
                     app.dir_down();
                     return before != (app.dir_cursor, app.dir_scroll);
                 }
-                c if keys.up.matches(c, modifiers) => {
+                c if keys.up.matches(c, modifiers)
+                    || (c == KeyCode::Up && modifiers.is_empty()) =>
+                {
                     let before = (app.dir_cursor, app.dir_scroll);
                     app.dir_up();
                     return before != (app.dir_cursor, app.dir_scroll);
                 }
-                c if keys.top.matches(c, modifiers) => {
+                c if keys.top.matches(c, modifiers)
+                    || (c == KeyCode::Home && modifiers.is_empty()) =>
+                {
                     let before = (app.dir_cursor, app.dir_scroll);
                     app.dir_top();
                     return before != (app.dir_cursor, app.dir_scroll);
                 }
-                c if keys.bottom.matches(c, modifiers) => {
+                c if keys.bottom.matches(c, modifiers)
+                    || (c == KeyCode::End && modifiers.is_empty()) =>
+                {
                     let before = (app.dir_cursor, app.dir_scroll);
                     app.dir_bottom();
                     return before != (app.dir_cursor, app.dir_scroll);
                 }
                 KeyCode::Enter if modifiers.is_empty() => {
                     let cursor = app.dir_cursor;
-                    return app.open_file_from_dir(cursor);
+                    let opened = app.open_file_from_dir(cursor);
+                    return opened || app.has_active_toast();
                 }
                 KeyCode::Esc if modifiers.is_empty() && app.dir_search_active => {
                     app.dir_search_active = false;
                     app.search_query.clear();
+                    app.search_query_norm.clear();
+                    app.search_has_upper = false;
                     app.search_matches.clear();
                     app.search_current = 0;
                     app.dir_search_cursor = 0;
+                    app.invalidate_search_cache();
                     return true;
                 }
                 c if keys.search.matches(c, modifiers) => {
@@ -475,7 +530,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
                 _ => return false,
             },
             crate::app::DirView::FileView => match code {
-                KeyCode::Esc | KeyCode::Backspace => {
+                KeyCode::Esc | KeyCode::Backspace if modifiers.is_empty() => {
                     app.return_to_file_list();
                     return true;
                 }
@@ -496,20 +551,25 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
             true
         }
 
-        c if keys.focus_prev.matches(c, modifiers)
+        c if (keys.focus_prev.matches(c, modifiers)
+            || (c == KeyCode::Left && modifiers.is_empty()))
             && app.focus == Focus::Content
-            && app.show_toc =>
+            && app.is_toc_visible() =>
         {
             app.focus = Focus::Toc;
             true
         }
-        c if keys.focus_next.matches(c, modifiers) && app.focus == Focus::Toc => {
+        c if (keys.focus_next.matches(c, modifiers)
+            || (c == KeyCode::Right && modifiers.is_empty()))
+            && app.focus == Focus::Toc =>
+        {
             app.focus = Focus::Content;
             true
         }
         KeyCode::Tab if modifiers.is_empty() => {
+            let before = app.focus;
             app.toggle_focus();
-            true
+            before != app.focus
         }
 
         c if keys.toggle_toc.matches(c, modifiers) => {
@@ -529,7 +589,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
             true
         }
 
-        c if keys.down.matches(c, modifiers) => {
+        c if keys.down.matches(c, modifiers) || (c == KeyCode::Down && modifiers.is_empty()) => {
             let before = (app.scroll, app.toc_cursor, app.toc_scroll);
             if app.focus == Focus::Content {
                 app.scroll_down(1);
@@ -538,7 +598,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
             }
             before != (app.scroll, app.toc_cursor, app.toc_scroll)
         }
-        c if keys.up.matches(c, modifiers) => {
+        c if keys.up.matches(c, modifiers) || (c == KeyCode::Up && modifiers.is_empty()) => {
             let before = (app.scroll, app.toc_cursor, app.toc_scroll);
             if app.focus == Focus::Content {
                 app.scroll_up(1);
@@ -558,22 +618,26 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
             before != (app.toc_cursor, app.toc_scroll)
         }
 
-        c if keys.page_down.matches(c, modifiers) => {
+        c if keys.page_down.matches(c, modifiers)
+            || (c == KeyCode::PageDown && modifiers.is_empty()) =>
+        {
             let before = app.scroll;
             app.scroll_down(app.half_page());
             before != app.scroll
         }
-        c if keys.page_up.matches(c, modifiers) => {
+        c if keys.page_up.matches(c, modifiers)
+            || (c == KeyCode::PageUp && modifiers.is_empty()) =>
+        {
             let before = app.scroll;
             app.scroll_up(app.half_page());
             before != app.scroll
         }
-        c if keys.top.matches(c, modifiers) => {
+        c if keys.top.matches(c, modifiers) || (c == KeyCode::Home && modifiers.is_empty()) => {
             let before = app.scroll;
             app.scroll_top();
             before != app.scroll
         }
-        c if keys.bottom.matches(c, modifiers) => {
+        c if keys.bottom.matches(c, modifiers) || (c == KeyCode::End && modifiers.is_empty()) => {
             let before = app.scroll;
             app.scroll_bottom();
             before != app.scroll
@@ -616,14 +680,9 @@ fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
 }
 
 fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        match code {
-            KeyCode::Char('c') | KeyCode::Char('d') => {
-                app.search_cancel();
-                return true;
-            }
-            _ => {}
-        }
+    if modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'd')) {
+        app.search_cancel();
+        return true;
     }
 
     match code {
@@ -662,6 +721,10 @@ fn handle_search_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
 }
 
 fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        app.toggle_help();
+        return true;
+    }
     match code {
         c if config::keymap().help.matches(c, modifiers) => {
             app.toggle_help();
@@ -680,10 +743,17 @@ fn handle_help_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> boo
 }
 
 fn handle_theme_picker_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        if let Some(index) = app.cancel_theme_picker() {
+            apply_theme_and_invalidate(app, index);
+        }
+        return true;
+    }
+
     let keys = config::keymap();
     let preview = |app: &mut App, delta| {
         if let Some(index) = app.move_theme_picker(delta, config::AVAILABLE_THEMES.len()) {
-            config::apply_theme_by_index(index);
+            apply_theme_and_invalidate(app, index);
             true
         } else {
             false
@@ -693,7 +763,7 @@ fn handle_theme_picker_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers
     match code {
         KeyCode::Esc if modifiers.is_empty() => {
             if let Some(index) = app.cancel_theme_picker() {
-                config::apply_theme_by_index(index);
+                apply_theme_and_invalidate(app, index);
             }
             true
         }
@@ -703,12 +773,16 @@ fn handle_theme_picker_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers
         }
         c if keys.quit.matches(c, modifiers) || keys.next_theme.matches(c, modifiers) => {
             if let Some(index) = app.cancel_theme_picker() {
-                config::apply_theme_by_index(index);
+                apply_theme_and_invalidate(app, index);
             }
             true
         }
-        c if keys.up.matches(c, modifiers) => preview(app, -1),
-        c if keys.down.matches(c, modifiers) => preview(app, 1),
+        c if keys.up.matches(c, modifiers) || (c == KeyCode::Up && modifiers.is_empty()) => {
+            preview(app, -1)
+        }
+        c if keys.down.matches(c, modifiers) || (c == KeyCode::Down && modifiers.is_empty()) => {
+            preview(app, 1)
+        }
         _ => false,
     }
 }
